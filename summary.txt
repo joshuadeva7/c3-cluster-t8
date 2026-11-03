@@ -1,0 +1,32 @@
+=== PHASE 1: low-thrust spiral 500 km -> 1336 km, i = 66.04 deg (BHT-600, 39 mN, Isp 1500 s) ===
+Edelbaum estimate      : dv = 424.32 m/s (v_circ,500 - v_circ,1336)
+Sim (J2) spiral        : dv = 417.01 m/s, burn time = 20.26 days, xenon used = 4.641 kg of 16 kg
+Initial accel          : 2.349e-04 m/s^2 at 166.036 kg wet
+Phasing wait in parking: 6.85 h  (synodic period 9.98 h)
+RAAN / inc pre-offset  : 10.0050 / -0.0258 deg (cancel differential J2 drift over the spiral)
+Arrival time (t0)      : 20.55 days after injection (thrust cutoff)
+  SC1 arrival LVLH [m] : R -3138  V -5000  H 0
+  SC2 arrival LVLH [m] : R -3138  V -3625  H -2
+  SC3 arrival LVLH [m] : R -3139  V -2248  H -4
+
+=== PHASE 2: proximity ops (TOPEX orbit period 112.4 min) ===
+Timeline (h from arrival): holds 0.84 | bid done 1.34 | NMC in 2.09/3.03 | GO 3.97 | contact 5.05 | detumbled 9.33 | service done 10.33 | imagers out 11.46/10.52 | undock 11.79 | end 13.29
+SC1 (docker): prox-ops dv = 8.831 m/s (hydrazine 0.659 kg)  [rendezvous 7.155, inspection 0.000, docking 1.026, departure 0.650]
+     min range to TOPEX outside docking corridor: 30.0 m (KOZ 22 m)
+SC2 (imager): prox-ops dv = 9.585 m/s (hydrazine 0.715 kg)  [rendezvous 7.965, inspection 0.876, docking 0.000, departure 0.743]
+     min range to TOPEX outside docking corridor: 22.9 m (KOZ 22 m)
+SC3 (imager): prox-ops dv = 10.888 m/s (hydrazine 0.812 kg)  [rendezvous 8.867, inspection 1.100, docking 0.000, departure 0.921]
+     min range to TOPEX outside docking corridor: 22.4 m (KOZ 22 m)
+Min inter-craft distance: SC1-SC2 22.9 m, SC1-SC3 21.3 m, SC2-SC3 45.4 m
+Burns: 62 total; 1 outside the KOZ would enter the 22 m KOZ if the NEXT burn were missed
+
+=== DETUMBLE (docker) ===
+TOPEX Iz 11665 kg m^2, w0 0.6614 rad/s (T = 9.5 s), H = 7715 N m s
+Torque 0.50 N m (one 1 N thruster x 0.50 m arm), into MR-4 band +-0.00175 rad/s
+Detumble time = 15389 s = 4.27 h; hydrazine = 7.13 kg (total impulse 15389 N s)
+
+=== BUDGETS (per craft) ===
+SC1: dv used 425.8 of 1500 m/s (spiral 417.0 + prox 8.83)
+SC2: dv used 426.6 of 1500 m/s (spiral 417.0 + prox 9.58)
+SC3: dv used 427.9 of 1500 m/s (spiral 417.0 + prox 10.89)
+Docker hydrazine: prox 0.66 + detumble 7.13 = 7.79 kg of 18 kg

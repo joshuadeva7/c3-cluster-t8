@@ -1,0 +1,5 @@
+out/
+__pycache__/
+assets/cad/swarm_extended.stl
+assets/cad/swarm_retracted.stl
+*.chunk*

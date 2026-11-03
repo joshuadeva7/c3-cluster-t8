@@ -1,0 +1,44 @@
+flowchart LR
+  n0["Start"] --> n1{"Healthy?"}
+  n1{"Healthy?"} -->|yes| n2["Transfer to TOPEX vicinity"]
+  n2["Transfer to TOPEX vicinity"] --> n3["Search predicted position (visual + thermal IR)"]
+  n3["Search predicted position (visual + thermal IR)"] --> n4{"Detected?"}
+  n4{"Detected?"} -->|yes| n5{"Sensor OK?"}
+  n5{"Sensor OK?"} -->|yes| n6{"Cluster agrees within tol?"}
+  n6{"Cluster agrees within tol?"} -->|yes| n7["Target located"]
+  n7["Target located"] --> n8["Assign roles: 1 docker, 2 imagers"]
+  n8["Assign roles: 1 docker, 2 imagers"] --> n9["Imagers: stereo + IR survey at 22 m"]
+  n9["Imagers: stereo + IR survey at 22 m"] --> n10["Estimate spin state"]
+  n10["Estimate spin state"] --> n11{"Spin axis (max-inertia, H) within tol?"}
+  n11{"Spin axis (max-inertia, H) within tol?"} -->|yes| n12["Docker hold at 200 m"]
+  n12["Docker hold at 200 m"] --> n13["Glideslope to 30 m hold on spin axis"]
+  n13["Glideslope to 30 m hold on spin axis"] --> n14["Arm open (1 of 4)"]
+  n14["Arm open (1 of 4)"] --> n15["Wheel spin-up to TOPEX rate, hydrazine tops up"]
+  n15["Wheel spin-up to TOPEX rate, hydrazine tops up"] --> n16{"Synced within tol?"}
+  n16{"Synced within tol?"} -->|yes| n17["Final approach ~3 cm/s along axis"]
+  n17["Final approach ~3 cm/s along axis"] --> n18{"Arm close (2 of 4): captured?"}
+  n18{"Arm close (2 of 4): captured?"} -->|yes| n19["Hydrazine despin, 0.5 N·m"]
+  n19["Hydrazine despin, 0.5 N·m"] --> n20{"Loads and fuel OK?"}
+  n20{"Loads and fuel OK?"} -->|yes| n21{"|ω| ≤ 0.00175 rad/s verified (MR-4)?"}
+  n21{"|ω| ≤ 0.00175 rad/s verified (MR-4)?"} -->|yes| n22["Stable hold"]
+  n22["Stable hold"] --> n23["Arm open (3 of 4), release"]
+  n23["Arm open (3 of 4), release"] --> n24["Back out to 30 m"]
+  n24["Back out to 30 m"] --> n25["Arm close (4 of 4)"]
+  n25["Arm close (4 of 4)"] --> n26["Regroup, next target"]
+  n1{"Healthy?"} -->|no| n27["Safe mode"]
+  n4{"Detected?"} -->|no| n28["Widen search / request new ephemeris"]
+  n28["Widen search / request new ephemeris"] --> n3["Search predicted position (visual + thermal IR)"]
+  n5{"Sensor OK?"} -->|no| n29["Switch to backup sensor or teammate data"]
+  n29["Switch to backup sensor or teammate data"] --> n3["Search predicted position (visual + thermal IR)"]
+  n6{"Cluster agrees within tol?"} -->|no| n30["More measurements"]
+  n30["More measurements"] --> n6{"Cluster agrees within tol?"}
+  n11{"Spin axis (max-inertia, H) within tol?"} -->|no| n31["More imaging"]
+  n31["More imaging"] --> n10["Estimate spin state"]
+  n16{"Synced within tol?"} -->|no| n32["Keep syncing"]
+  n32["Keep syncing"] --> n16{"Synced within tol?"}
+  n18{"Arm close (2 of 4): captured?"} -->|no| n33["Arm open, back off to 30 m, retry"]
+  n33["Arm open, back off to 30 m, retry"] --> n15["Wheel spin-up to TOPEX rate, hydrazine tops up"]
+  n20{"Loads and fuel OK?"} -->|no| n34["Lower torque / call 2nd craft"]
+  n34["Lower torque / call 2nd craft"] --> n19["Hydrazine despin, 0.5 N·m"]
+  n21{"|ω| ≤ 0.00175 rad/s verified (MR-4)?"} -->|no| n35["Keep despinning"]
+  n35["Keep despinning"] --> n19["Hydrazine despin, 0.5 N·m"]

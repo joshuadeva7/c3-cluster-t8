@@ -23,3 +23,10 @@ New work lives here. Nothing outside `v2/` is touched. Merge later.
 - Hydrazine: 18 kg N2H4 / 20 L per craft (STM; TRR mass budget D30). No source gives a hydrazine dv budget, so it is reported in kg.
   SC1: 7.7 kg (prox, spin-up, despin). SC2/SC3: 0.55 / 0.58 kg.
 - MR-4: |ω| ≤ 0.00175 rad/s.
+
+## v2 video section
+
+- Preview a still: `python3 mission_anim.py preview T --scale 0.5` (~2 s). Clip: `python3 mission_anim.py clip PHASE --fps 10 --scale 0.5`.
+- Full render: `python3 mission_anim.py` at full scale (1080p, 30 fps, ~10 min).
+- CAD: SWARM (arms extended/retracted) and TOPEX-Poseidon_scaled meshes are decoded from the display meshes stored inside the native SolidWorks files (`cad_extract/`, `build_cad_meshes.py`). Render-ready caches are in `assets/` (`cad_render.npz`, `cad/*_lite.stl`, `cad/topex.stl`).
+- Final video: `video/SWARM_mission_v2_full.mp4` (1080p, 30 fps, 102 s).

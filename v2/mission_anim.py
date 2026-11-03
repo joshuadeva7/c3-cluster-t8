@@ -118,8 +118,19 @@ for k in range(3):
 DVK = [np.interp(np.r_[px.t.values], px.t.values, px[f"dv{k}"].values) for k in range(3)]
 
 
+DEP_DIR = np.array([-0.25, -1.0, 0.0]) / np.hypot(0.25, 1.0)   # leaving: back along -V-bar, slightly low
+DEP_A = 2e-4   # visual only: Hall-thruster-scale acceleration for the departure shot (no number is shown)
+
+
+def relv(k, ts):
+    ts = np.atleast_1d(ts).astype(float)
+    P = np.array([np.interp(ts, REL_T, REL[k][:, j]) for j in range(3)]).T
+    tau = np.maximum(ts - P_END, 0.0)
+    return P + (0.5 * DEP_A * tau ** 2)[:, None] * DEP_DIR
+
+
 def rel(k, trel):
-    return np.array([np.interp(trel, REL_T, REL[k][:, i]) for i in range(3)])
+    return relv(k, trel)[0]
 
 
 def evt(craft, prefix, which="t0"):
@@ -151,7 +162,7 @@ KN = [(0, 0), (4, 600), (8.6, T_B1 - 300), (10.2, T_B1 + 2400), (15.6, T_ARR - 4
       (27, T_ARR + P_HOLD), (31, T_ARR + P_BID), (39, T_ARR + P_NMC2), (43, T_ARR + P_GO),
       (49, T_ARR + P_H30), (52, T_ARR + P_FA), (57, T_ARR + P_CON), (66, T_ARR + P_DT),
       (71, T_ARR + P_SVC), (74, T_ARR + P_I2OUT), (77, T_ARR + P_UND), (84, T_ARR + P_END),
-      (89.5, T_ARR + P_END + 240)]
+      (90, T_ARR + P_END + 1500), (96, T_ARR + P_END + 3600), (102, T_ARR + P_END + 5400)]
 DUR = KN[-1][0]
 V_SW = 21.0
 vmap = PchipInterpolator([k[0] for k in KN], [k[1] for k in KN])
@@ -165,34 +176,26 @@ TVIS = np.cumsum(_re) / FPS
 TVIS += T_ARR - TVIS[int(V_SW * FPS)]
 
 # phases follow the autonomy flowchart (midterm Fig. flowchart, updated in v2/flowchart)
-PHASES = [("Transfer to TOPEX vicinity", 0, 21), ("Search and detect", 21, 27), ("Assign roles", 27, 31),
-          ("Thermal + visual survey", 31, 39), ("Docker hold at 200 m", 39, 43), ("Glideslope to 30 m on spin axis", 43, 49),
-          ("Arm open, spin sync", 49, 52), ("Final approach and capture", 52, 57), ("Despin", 57, 66),
-          ("Stable hold", 66, 74), ("Release", 74, DUR)]
+PHASES = [("Climb to TOPEX's orbit", 0, 21), ("Searching for TOPEX", 21, 27), ("Picking the docker", 27, 31),
+          ("Imagers survey TOPEX", 31, 39), ("Docker waits at 200 m", 39, 43), ("Docker closes to 30 m", 43, 49),
+          ("Docker matches TOPEX's spin", 49, 52), ("Capture", 52, 57), ("Slowing TOPEX down", 57, 66),
+          ("TOPEX is stable", 66, 74), ("Letting go", 74, 84), ("Heading to the next target", 84, DUR)]
 CAPS = [
-    (4.6, 8.6, "Parking orbit at 500 km, waiting for the phase angle to TOPEX."),
-    (9.0, 15.4, f"Hall thruster fires the last {DUTY0:.0f}–{DUTY1:.0f}% of each orbit (power-limited): {DV_SP:.0f} m/s, {SP_DAYS:.0f} days, {XE_USED:.1f} kg Xe."),
-    (15.8, 21.0, "Cutoff 5–7 km behind TOPEX, 1 km low, no relative drift."),
-    (21.4, 27.0, "Hall off. Hydrazine transfers to V-bar holds 1.0–1.6 km behind. Visual and thermal search."),
-    (27.4, 31.0, "Roles assigned on board: one docker, two imagers."),
-    (31.4, 39.0, "Imagers circle at 22 m (LCAM stereo, ECAM-IR3A) and estimate the spin state and max-inertia axis."),
-    (39.4, 43.0, "Docker holds at 200 m until the spin-axis estimate is within tolerance."),
-    (43.4, 49.0, "Glideslope 200 → 30 m along the spin axis."),
-    (49.4, 52.0, f"Arm opens. Reaction wheel spins the docker to 0.66 rad/s; {MP_SU * 1000:.0f} g hydrazine covers the rest."),
-    (52.4, 57.0, f"3 cm/s to {DOCK_R:.1f} m, arm closes."),
-    (57.4, 65.7, f"Hydrazine, 0.5 N·m: 0.66 → 0.00175 rad/s in {T_DET / 3600:.1f} h, {MP_DT:.1f} kg."),
-    (66.0, 74.0, "Stable hold, |ω| ≤ 0.00175 rad/s (MR-4), verified by the imagers."),
-    (74.4, 84.0, "Imagers leave first. Arm opens, docker backs out to 30 m, arm closes."),
+    (4.6, 8.6, "All three wait in a 500 km orbit until TOPEX is in the right spot."),
+    (9.0, 15.4, f"The Hall thruster runs about {DUTY0:.0f} to {DUTY1:.0f}% of each orbit. The climb takes {SP_DAYS:.0f} days and {XE_USED:.1f} kg of xenon."),
+    (15.8, 21.0, "They stop 5 to 7 km behind TOPEX and about 1 km below it."),
+    (21.4, 27.0, "Small hydrazine burns bring them to 1 to 1.6 km behind TOPEX, then the cameras look for it."),
+    (27.4, 31.0, "The closest one becomes the docker. The other two image."),
+    (31.4, 39.0, "The imagers fly around TOPEX at 22 m and measure how it is spinning."),
+    (39.4, 43.0, "The docker waits until the spin axis is known."),
+    (43.4, 49.0, "The docker moves in along TOPEX's spin axis."),
+    (49.4, 52.0, f"The docker spins up to 0.66 rad/s, mostly on its wheel ({MP_SU * 1000:.0f} g of hydrazine)."),
+    (52.4, 57.0, f"The docker moves in at 3 cm/s and stops {DOCK_R:.1f} m from TOPEX's center."),
+    (57.4, 65.7, f"Hydrazine thrusters slow TOPEX from 0.66 to 0.00175 rad/s over {T_DET / 3600:.1f} h, using {MP_DT:.1f} kg."),
+    (66.0, 74.0, "TOPEX is below 0.00175 rad/s. The imagers check it."),
+    (74.4, 84.0, "The imagers leave, then the docker lets go and joins them about 1 km behind TOPEX."),
+    (84.4, 95.0, "Hall thrusters back on, heading to the next target."),
 ]
-
-def arm_grip(trel):
-    # 4 actuations: open at the 30 m hold, close on capture, open to release, close at 30 m after back-out
-    clamp = 2.3   # closed on the 2.2 m TOPEX bus
-    op = ss(P_H30, P_H30 + ARM_T, trel) * (1 - ss(P_CON, P_CON + ARM_T, trel)) \
-        + ss(P_UND - ARM_T, P_UND, trel) * (1 - ss(P_BO, P_BO + ARM_T, trel))
-    base = clamp if P_CON <= trel < P_UND else 1.211
-    return base + (2.611 - base) * op
-
 
 # ------------------------------------------------------------------ attitude / spin
 def omega(trel):
@@ -233,6 +236,9 @@ def ss(a, b, x):
 
 def window(v, a, b, fade=0.45):
     return float(ss(a, a + fade, v) * (1 - ss(b - fade, b, v)))
+
+
+DOCK_CLOCK = -math.pi / 2   # docker rolled 90 deg about its docking axis so the open claw clears TOPEX's dish
 
 
 def Ry(a):
@@ -277,7 +283,7 @@ LK = [  # v, target y, target z, az, el, dist
     (21.0, -3600, 0, -35, 30, 15000), (27.0, -1900, 0, -40, 30, 8200), (31.0, -1250, 0, -45, 30, 4600),
     (35.5, -100, 0, -51, 31, 560), (43.0, -90, 0, -58, 31, 480), (49.0, -38, 0, -63, 29, 300),
     (55.0, -9, 0, -67, 26, 68), (58.0, -1.5, 1.2, -70, 24, 40), (66.0, -1.0, 1.2, -82, 26, 44),
-    (72.0, -8, 0, -100, 29, 210), (84.0, -600, 0, -128, 30, 4600), (DUR, -600, 0, -134, 30, 4900)]
+    (72.0, -8, 0, -100, 29, 210), (78.0, -20, 0, -112, 29, 320), (84.0, -1300, 0, -128, 30, 2600), (88.0, -1500, 0, -134, 30, 1800), (91.0, -1800, 0, -138, 31, 2000), (96.0, -2600, 0, -144, 35, 12000), (DUR, -3500, 0, -150, 42, 40000)]
 LK = np.array(LK, float)
 LKI = [PchipInterpolator(LK[:, 0], LK[:, j]) for j in (1, 2, 3, 4)]
 LKD = PchipInterpolator(LK[:, 0], np.log(LK[:, 5]))
@@ -290,6 +296,16 @@ def camera(i):
     if frame == "lvlh":
         T = np.array([float(LKX(v)), float(LKI[0](v)), float(LKI[1](v))])
         D = dir_lvlh(float(LKI[2](v)), float(LKI[3](v))); d = float(np.exp(LKD(v)))
+        if v > 77.0:   # frame the cluster (and TOPEX until it is left behind) as they leave
+            pc = [relv(k, TG[i] - T_ARR)[0] for k in range(3)]
+            lo, hi = np.min(pc + [np.zeros(3)], axis=0), np.max(pc + [np.zeros(3)], axis=0)
+            lo2, hi2 = np.min(pc, axis=0), np.max(pc, axis=0)
+            ct = ss(84.5, 88.0, v) * (1 - ss(92.0, 97.0, v))    # close on the cluster while the plumes light, then let the wide shot take over
+            c0 = (lo + hi) / 2 * (1 - ct) + (lo2 + hi2) / 2 * ct
+            e0 = np.linalg.norm(hi - lo) * (1 - ct) + max(1.4 * np.linalg.norm(hi2 - lo2), 300.0) * ct
+            wf = ss(77.0, 78.5, v)
+            T = T + (c0 - T) * wf
+            d = max(d * (1 - ct) + d * 0.0 * ct, d + (2.4 * e0 - d) * wf) if ct < 1 else 2.4 * e0
         Pc = T + D * d; f = -D; rr = unit(np.cross(f, XH)); uu = np.cross(rr, f)
         return dict(P=Pc, f=f, r=rr, u=uu, T=T, d=d, frame=frame, C=C, rT=r)
     j = max(k for k in range(len(KEYS)) if KEYS[k][0] <= v)
@@ -337,6 +353,9 @@ THETA0 = math.atan2(sub[1], sub[0]) - math.radians(-38) - WE * T_ARR
 EH, EW = H // 2, W // 2
 
 
+_DITHER = np.random.default_rng(3).random((H, W)).astype(np.float32)
+
+
 def earth_image(cam, E, sun, to_ecef):
     ys, xs = np.mgrid[0:EH, 0:EW].astype(np.float32)
     sx = (xs + 0.5) * (W / EW); sy = (ys + 0.5) * (H / EH)
@@ -359,9 +378,16 @@ def earth_image(cam, E, sun, to_ecef):
         ndl = n @ sun
         ne = to_ecef(n)
         lon = np.arctan2(ne[:, 1], ne[:, 0]); lat = np.arcsin(np.clip(ne[:, 2], -1, 1))
-        u = ((lon + np.pi) / (2 * np.pi) * LW).astype(int) % LW
-        vv = np.clip(((np.pi / 2 - lat) / np.pi * LH).astype(int), 0, LH - 1)
-        land = LAND[vv, u][:, None]
+        # bilinear land mask; when a mask texel covers many screen pixels (camera close to Earth),
+        # fade the coastlines out instead of showing blocky texels
+        uf = (lon + np.pi) / (2 * np.pi) * LW - 0.5; vf = np.clip((np.pi / 2 - lat) / np.pi * LH - 0.5, 0, LH - 1.001)
+        u0 = np.floor(uf).astype(int); v0 = np.floor(vf).astype(int); du = uf - u0; dv = vf - v0
+        L = LAND.astype(np.float32)
+        land = ((L[v0, u0 % LW] * (1 - du) + L[v0, (u0 + 1) % LW] * du) * (1 - dv)
+                + (L[v0 + 1, u0 % LW] * (1 - du) + L[v0 + 1, (u0 + 1) % LW] * du) * dv)
+        texel_px = (2 * np.pi * RE_ / LW) / np.maximum(tq, 1.0) * FPX
+        fade = 1 - ss(3.0, 12.0, texel_px)
+        land = (land * fade + 0.3 * (1 - fade))[:, None]
         ice = ss(1.08, 1.22, np.abs(lat))[:, None]
         base = OCEAN * (1 - land) + (LANDC * (1 - ice) + ICE * ice) * land
         lit = 0.035 + 1.05 * np.clip(ndl, 0, 1)[:, None] ** 0.85
@@ -370,6 +396,7 @@ def earth_image(cam, E, sun, to_ecef):
         mu = np.clip(-(dirs[hit] @ n.T).diagonal() if False else -np.einsum("ij,ij->i", dirs[hit], n), 0, 1)
         rim = (1 - mu) ** 3.2
         col += ATM * rim[:, None] * (0.08 + 0.75 * ss(-0.25, 0.5, ndl))[:, None]
+        col += (_DITHER[:EH, :EW][hit][:, None] - 0.5) * (2.0 / 255)   # dither: no 8-bit banding on the dark night side
         img[hit, :3] = np.clip(col, 0, 1)
         img[hit, 3] = alpha[hit]
     # atmospheric halo outside the disk
@@ -435,24 +462,36 @@ def disk(c, rad, nax, R, col, tag, k=12):
 FOIL, CELL, WHITE = np.array([0.74, 0.60, 0.33]), np.array([0.12, 0.19, 0.36]), np.array([0.80, 0.82, 0.85])
 
 
+_CM = np.load(os.path.join(HERE, "assets", "cad_render.npz"))   # real CAD, cached by build_cad_meshes.py
+
+
+def _prep(v, f):
+    v = v.astype(float); e1 = v[f[:, 1]] - v[f[:, 0]]; e2 = v[f[:, 2]] - v[f[:, 0]]
+    n = np.cross(e1, e2); l = np.linalg.norm(n, axis=1); ok = l > 1e-12
+    return v, f[ok], n[ok] / l[ok][:, None], ok
+
+
+TM_V, TM_F, TM_N, _ok = _prep(_CM["topex_v"], _CM["topex_f"]); TM_C = _CM["topex_c"].astype(float)[_ok]
+SW = {k: _prep(_CM[k + "_v"], _CM[k + "_f"])[:3] for k in ("shell", "inner", "arr_dep", "arr_sto", "arm_ext", "arm_end")}
+
+
 def topex_model(R, origin=np.zeros(3)):
-    o = origin
-    f = box(o, np.array([1.1, 1.8, 1.1]), R, FOIL, "tgt")
-    f += box(o + R @ np.array([0, 0, 1.55]), np.array([0.06, 0.06, 0.45]), R, WHITE * 0.7, "tgt")
-    f += panel(o + R @ np.array([0, 0.3, 6.45]), 1.65, 4.45, (1, 2), R, CELL, "tgt", 2, 5)
-    f += disk(o + R @ np.array([-1.12, 0.2, 0]), 0.75, 0, R, WHITE, "tgt")
-    return f
+    V = origin + TM_V @ R.T; N = TM_N @ R.T
+    return [(V[f], N[j], TM_C[j], "panel", "tgt") for j, f in enumerate(TM_F)]
 
 
-def sc_model(R, o, accent, grip=1.211):
-    # bus 1021 (R) x 600 (docking axis) x 1508 mm, arrays to 4339 mm span x 1548 mm (Section 4)
-    # gripper: grip length 1211 mm retracted to 2611 mm open (midterm report, gripper hardware)
-    f = box(o, np.array([0.51, 0.30, 0.754]), R, WHITE * 0.92 + accent * 0.08, "sc")
-    f += box(o + R @ np.array([0, 0.33, 0]), np.array([grip / 2, 0.03, 0.03]), R, accent * 0.85, "sc")
-    for sx_ in (-1, 1):   # fingers on the target-facing side
-        f += box(o + R @ np.array([sx_ * grip / 2, 0.55, 0]), np.array([0.05, 0.25, 0.075]), R, accent * 0.85, "sc")
-    for s in (-1, 1):
-        f += panel(o + R @ np.array([0, 0, s * 1.462]), 0.774, 0.708, (1, 2), R, CELL, "sc", 1, 2)
+def _mesh(key, R, o, col, tag="sc"):
+    v, f, n = SW[key]; V = o + v @ R.T; N = n @ R.T
+    return [(V[t], N[j], col, "panel", tag) for j, t in enumerate(f)]
+
+
+def sc_model(R, o, accent, deployed=True):
+    # SWARM Assembly.SLDASM, 'Extended' gripper (always open): body +y = gripper side (faces TOPEX)
+    f = _mesh("shell", R, o, WHITE * 0.92 + accent * 0.08)
+    f += _mesh("inner", R, o, FOIL * 0.9)
+    f += _mesh("arr_dep" if deployed else "arr_sto", R, o, CELL)
+    f += _mesh("arm_ext", R, o, accent * 0.85)
+    f += _mesh("arm_end", R, o, WHITE * 0.75)   # gripperarm rotor + pads at the arm tips
     return f
 
 
@@ -614,7 +653,7 @@ def draw_eci(ax, cam, i, v, tg, E, labels):
     pc = spC[0](tg); xc, yc, _ = project(cam, pc)
     hidc = behind_earth(cam, pc, E, RE_)[0]
     if not zoomed:
-        labels.append((xc[0], yc[0], "SWARM ×3", C_NEU, window(v, 3.5, 9.0) * (0 if hidc else 1) * (1 - fast), -26, 26))
+        labels.append((xc[0], yc[0], "SWARM (3 spacecraft)", C_NEU, window(v, 3.5, 9.0) * (0 if hidc else 1) * (1 - fast), -26, 26))
     # thrust-on marker
     if vb1 <= v < vb1 + 2.4:
         pb = spC[0](T_B1); xb, yb, _ = project(cam, pb)
@@ -622,7 +661,7 @@ def draw_eci(ax, cam, i, v, tg, E, labels):
         if u < 1:
             ax.scatter([xb[0]], [yb[0]], s=(10 + 60 * u) ** 2 / 4, facecolors="none", edgecolors=C_DOCK,
                        linewidths=1.2, alpha=(1 - u), zorder=13)
-        labels.append((xb[0], yb[0], "BHT-600 on, 39 mN", C_DOCK, window(v, vb1, vb1 + 2.4, 0.3), 30, 22))
+        labels.append((xb[0], yb[0], "Hall thruster on", C_DOCK, window(v, vb1, vb1 + 2.4, 0.3), 30, 22))
 
 
 def draw_lvlh(ax, cam, i, v, trel, sun, labels):
@@ -642,7 +681,7 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
         x, y, _ = project(cam, np.array([0, yh, 0]))
         ax.scatter(x, y, s=22, facecolors="none", edgecolors=MUTED, linewidths=0.9, alpha=0.8, zorder=5)
     # spheres (KOZ 25 m, approach 200 m)
-    for R, col, a0, ls, lab in ((22.0, C_RED, 0.55, "-", "KOZ 22 m"), (200.0, MUTED, 0.45, (0, (3, 4)), "200 m")):
+    for R, col, a0, ls, lab in ((22.0, C_RED, 0.55, "-", "22 m keep-out"), (200.0, MUTED, 0.45, (0, (3, 4)), "200 m")):
         vis = a0 * (1 - ss(R * 40, R * 80, d)) * (1 - ss(57.5, 59, v) * (R == 200)) * (1 - 0.5 * ss(57.5, 59, v) * (R == 25))
         if vis < 0.01: continue
         cx, cy, cz = project(cam, np.zeros(3))
@@ -658,7 +697,7 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
         col = role_color(k, v)
         t0 = max(0.0, trel - wins)
         ts = np.linspace(t0, trel, 420)
-        Pk = np.array([np.interp(ts, REL_T, REL[k][:, j]) for j in range(3)]).T
+        Pk = relv(k, ts)
         far = np.linalg.norm(Pk, axis=1) > 8.5e3
         sx, sy, z = project(cam, Pk)
         sx[far] = np.nan
@@ -681,14 +720,26 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
         if k == 0 and P_CON <= trel < P_UND:
             p = np.array([0, -DOCK_R, 0])
         if k == 0:
-            Rk = Ry(ROLL[i])
+            Rk = Ry(ROLL[i]) @ Ry(DOCK_CLOCK)
         else:
             by = unit(-p) if np.linalg.norm(p) > 1 else np.array([0, 1.0, 0])
             bx = unit(XH - np.dot(XH, by) * by); bz = np.cross(bx, by)
             Rk = np.c_[bx, by, bz]
         sc_pos.append(p)
-        faces += sc_model(Rk, p, role_color(k, v), arm_grip(trel) if k == 0 else 1.211)
+        faces += sc_model(Rk, p, role_color(k, v), deployed=trel >= 0)
     draw_faces(ax, cam, faces, sun)
+    # Hall thruster plumes on the way out
+    pa = ss(P_END, P_END + 300, trel)
+    if pa > 0.01:
+        for k in range(3):
+            p = sc_pos[k]
+            x0, y0, z0 = project(cam, p); x1, y1, _ = project(cam, p - DEP_DIR * 50.0)
+            dx, dy = x1[0] - x0[0], y1[0] - y0[0]; L = math.hypot(dx, dy)
+            if not np.isfinite(L) or L < 1e-6: continue
+            Lp = float(np.clip(FPX * 2.5 / max(z0[0], 1e-6), 26, 160)); dx, dy = dx / L * Lp, dy / L * Lp
+            for frac, lw, al in ((1.0, 7, 0.10), (0.75, 3.5, 0.22), (0.45, 1.6, 0.55)):
+                ax.plot([x0[0], x0[0] + dx * frac], [y0[0], y0[0] + dy * frac], color="#8fb4ff", lw=lw,
+                        alpha=al * pa, solid_capstyle="round", zorder=11)
     # dots + labels when small
     x, y, z = project(cam, np.zeros(3))
     pxs = FPX * 10.0 / max(z[0], 1e-6)
@@ -708,7 +759,7 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
         if 55 < v < 72 and k > 0: a *= 0.0 if d < 120 else 1
         if 27.4 < v < 31.2:
             cost = np.linalg.norm(rel(k, T_ARR * 0 + P_HOLD)) / 1000.0
-            txt = f"SC{k + 1}  {cost:.2f} km" if v < 29.6 else txt
+            txt = f"SC{k + 1}, {cost:.2f} km away" if v < 29.6 else txt
         o = min(max(30, pxs * 0.75), 110)
         dx = -o if (k == 2 and v < 35) or (k == 0 and v > 50) else o
         dy = o if k == 1 else -o
@@ -722,7 +773,7 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
                 ax.scatter(x, y, s=(10 + 60 * u) ** 2 / 4, facecolors="none", edgecolors=C_NEU, linewidths=1.2,
                            alpha=(1 - u), zorder=13)
         x, y, _ = project(cam, rel(0, max(trel, 0)))
-        labels.append((x[0], y[0], "Hall thrust cutoff", C_NEU, window(v, 21.0, 23.6, 0.3), -34, 30))
+        labels.append((x[0], y[0], "Hall thruster off", C_NEU, window(v, 21.0, 23.6, 0.3), -34, 30))
     # burns (prox)
     if v < 84:
         for _, b in bu[(bu.dv > 0.02)].iterrows():
@@ -737,27 +788,24 @@ def draw_lvlh(ax, cam, i, v, trel, sun, labels):
 
 
 def draw_faces(ax, cam, faces, sun):
-    polys, fcs, ecs, dep = [], [], [], []
-    for q, n, col, kind, tag in faces:
-        c = q.mean(axis=0)
-        view = cam["P"] - c
-        if kind == "solid" and np.dot(n, view) <= 0: continue
-        sx, sy, z = project(cam, q)
-        if (z <= 0.05).any(): continue
-        ndl = np.dot(n, sun)
-        if kind == "panel":
-            nv = n if np.dot(n, view) > 0 else -n
-            ndl = np.dot(nv, sun)
-        nv2 = n if (kind == "solid" or np.dot(n, view) > 0) else -n
-        es = max(-nv2[0], 0) * 0.22 if cam["frame"] == "lvlh" else 0
-        sh = 0.20 + 0.85 * max(ndl, 0) + es
-        fc = np.clip(col * sh, 0, 1)
-        ec = np.clip(fc * 1.35 + 0.05, 0, 1) if kind == "panel" else np.clip(fc * 1.12 + 0.03, 0, 1)
-        polys.append(np.c_[sx, sy]); fcs.append(fc); ecs.append(ec); dep.append(np.dot(c - cam["P"], cam["f"]))
-    if not polys: return
-    order = np.argsort(dep)[::-1]
-    ax.add_collection(PolyCollection([polys[j] for j in order], facecolors=[fcs[j] for j in order],
-                                     edgecolors=[ecs[j] for j in order], linewidths=0.6, zorder=10))
+    # all models are triangle meshes: shade and depth-sort them in one batch (painter's order, far to near)
+    faces = [x for x in faces if len(x[0]) == 3]
+    if not faces: return
+    Q = np.array([x[0] for x in faces]); N = np.array([x[1] for x in faces]); C = np.array([x[2] for x in faces])
+    tgt = np.array([x[4] == "tgt" for x in faces])
+    c = Q.mean(axis=1); view = cam["P"] - c
+    sx, sy, z = project(cam, Q.reshape(-1, 3)); sx, sy, z = sx.reshape(-1, 3), sy.reshape(-1, 3), z.reshape(-1, 3)
+    ok = (z > 0.05).all(axis=1)
+    nv = np.where((np.einsum("ij,ij->i", N, view) > 0)[:, None], N, -N)      # double-sided: normal toward camera
+    ndl = nv @ sun
+    es = np.maximum(-nv[:, 0], 0) * 0.22 if cam["frame"] == "lvlh" else 0
+    sh = 0.32 + 0.78 * np.maximum(ndl, 0) + es
+    fc = np.clip(C * sh[:, None], 0, 1)
+    ec = np.where(tgt[:, None], fc, np.clip(fc * 1.12 + 0.03, 0, 1))
+    dep = (c - cam["P"]) @ cam["f"]
+    o = np.argsort(dep[ok])[::-1]
+    P = np.stack([sx, sy], axis=2)[ok][o]
+    ax.add_collection(PolyCollection(P, facecolors=fc[ok][o], edgecolors=ec[ok][o], linewidths=0.3, zorder=10))
 
 
 # ------------------------------------------------------------------ HUD
@@ -778,7 +826,7 @@ def draw_hud(ax, cam, i, v, tg, trel):
     hud_a = ss(3.6, 4.6, v) * (1 - ss(DUR - 5.2, DUR - 4.4, v))
     t_title = window(v, 0.4, 4.6, 0.7)
     if t_title > 0:
-        ax.text(80, H / 2, "SWARM settles TOPEX/Poseidon", color=INK, alpha=t_title, fontsize=34, family=SANS_L, va="center", zorder=Z)
+        ax.text(80, H / 2, "Stopping TOPEX/Poseidon's spin", color=INK, alpha=t_title, fontsize=34, family=SANS_L, va="center", zorder=Z)
     for name, a, b in PHASES:
         al = (window(v, a, b, 0.35) if a > 0 else window(v, -1, b, 0.35)) * hud_a
         if al > 0.01:
@@ -790,11 +838,11 @@ def draw_hud(ax, cam, i, v, tg, trel):
     # one telemetry line
     met = int(tg); dd, hh, mm = met // 86400, (met % 86400) // 3600, (met % 3600) // 60
     if tg < T_ARR:
-        tel = f"T+{dd} d {hh:02d}:{mm:02d}   h {(np.linalg.norm(spC[0](tg)) - RE_) / 1000:,.0f} km"
+        tel = f"T+{dd} d {hh:02d}:{mm:02d}   altitude {(np.linalg.norm(spC[0](tg)) - RE_) / 1000:,.0f} km"
     else:
-        r0 = 3.0 if P_CON <= trel < P_UND else np.linalg.norm(rel(0, trel))
+        r0 = DOCK_R if P_CON <= trel < P_UND else np.linalg.norm(rel(0, trel))
         rs = f"{r0 / 1000:.2f} km" if r0 >= 1000 else f"{r0:.1f} m"
-        tel = f"T+{dd} d {hh:02d}:{mm:02d}   SC1 range {rs}   ω {fmt_w(omega(trel))}"
+        tel = f"T+{dd} d {hh:02d}:{mm:02d}   docker {rs}" if v < 49 else f"T+{dd} d {hh:02d}:{mm:02d}   TOPEX spin {fmt_w(omega(trel))}"
     ax.text(W - 80, 70, tel, color=MUTED, alpha=hud_a, fontsize=13, family=MONO, ha="right", va="center", zorder=Z)
     # scale bar
     mpp = cam["d"] / FPX
@@ -814,23 +862,22 @@ def draw_hud(ax, cam, i, v, tg, trel):
         Y2 = lambda o: gy1 - (gy1 - gy0) * (math.log10(max(o, 3e-4)) - LO) / (HI - LO)
         ax.plot([gx0, gx0, gx1], [gy0, gy1, gy1], color=MUTED, lw=0.8, alpha=sa2, zorder=Z)
         ax.plot([gx0, gx1], [Y2(W_BAND)] * 2, color=MUTED, lw=0.8, ls=(0, (3, 3)), alpha=sa2, zorder=Z)
-        ax.text(gx1, Y2(W_BAND) - 9, "MR-4 0.00175", color=MUTED, alpha=sa2, fontsize=10, family=MONO, ha="right", va="center", zorder=Z)
+        ax.text(gx1, Y2(W_BAND) - 9, "target 0.00175", color=MUTED, alpha=sa2, fontsize=10, family=MONO, ha="right", va="center", zorder=Z)
         msk = ts <= trel
         if msk.any():
             ax.plot([X2(t) for t in ts[msk]], [Y2(o) for o in w[msk]], color=INK, lw=1.3, alpha=sa2, zorder=Z)
         for o_, lab_ in ((W0, "0.66"), (0.01, "0.01"), (1e-3, "0.001")):
             ax.text(gx0 - 8, Y2(o_), lab_, color=MUTED, alpha=sa2, fontsize=10, family=MONO, ha="right", va="center", zorder=Z)
-        ax.text(gx0, gy0 - 14, "TOPEX ω [rad/s]", color=MUTED, alpha=sa2, fontsize=10, family=MONO, va="center", zorder=Z)
+        ax.text(gx0, gy0 - 14, "TOPEX spin [rad/s]", color=MUTED, alpha=sa2, fontsize=10, family=MONO, va="center", zorder=Z)
         ax.text(gx1, gy1 + 14, f"{(ts[-1] - ts[0]) / 3600:.1f} h", color=MUTED, alpha=sa2, fontsize=10, family=MONO, ha="right", va="center", zorder=Z)
     # end card: plain numbers
     ea = ss(DUR - 5.0, DUR - 4.0, v)
     if ea > 0:
         ax.add_patch(plt.Rectangle((0, 0), W, H, color=BG, alpha=0.75 * ea, zorder=Z - 1))
-        lines = [("Spiral, 500 → 1336 km", f"{SP_DAYS:.0f} d, {DV_SP:.0f} m/s, {XE_USED:.1f} of 16 kg Xe"),
-                 ("Docker hydrazine", f"{MP_K[0]:.1f} of 18 kg (prox {MP_K[0] - MP_SU - MP_DT:.2f}, spin-up {MP_SU:.3f}, despin {MP_DT:.1f})"),
+        lines = [("Climb, 500 to 1336 km", f"{SP_DAYS:.0f} days, {DV_SP:.0f} m/s, {XE_USED:.1f} of 16 kg xenon"),
+                 ("Docker hydrazine", f"{MP_K[0]:.1f} of 18 kg"),
                  ("Imager hydrazine", f"{MP_K[1]:.2f} and {MP_K[2]:.2f} of 18 kg"),
-                 ("Despin", f"0.66 → 0.00175 rad/s in {T_DET / 3600:.1f} h (MR-4)"),
-                 ("Arm actuations", "4")]
+                 ("Despin", f"0.66 to 0.00175 rad/s in {T_DET / 3600:.1f} h")]
         for j, (k_, val) in enumerate(lines):
             y = 400 + j * 44
             ax.text(120, y, k_, color=MUTED, alpha=ea, fontsize=17, family=SANS_L, va="center", zorder=Z)
@@ -849,7 +896,7 @@ def render_chunk(args):
     a, b, out = args
     fig, ax = make_fig()
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(FPS),
-           "-i", "-", "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p", out]
+           "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p", out]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     for i in range(a, b):
         draw_frame(ax, i)
@@ -883,7 +930,7 @@ if __name__ == "__main__":
             if a_.startswith("--") or a_ == str(scale): continue
             j = min(int(float(a_) * FPS), NF - 1)
             draw_frame(ax, j)
-            fig.savefig(os.path.join(out, "preview", f"v{float(a_):05.1f}.png"), dpi=100 * scale)
+            fig.savefig(os.path.join(out, "preview", f"v{float(a_):05.1f}{os.environ.get('TAG', '')}.png"), dpi=100 * scale)
             print("preview", a_)
     elif mode == "clip":    # clip PHASE [--fps 10] [--scale 0.5]  -> out/clip_<phase>.mp4
         name, a, b = _phase(sys.argv[2])
@@ -903,12 +950,12 @@ if __name__ == "__main__":
         from multiprocessing import Pool
         nw = int(os.environ.get("NW", os.cpu_count() or 2))
         edges = np.linspace(0, NF, nw * 2 + 1).astype(int)
-        jobs = [(edges[j], edges[j + 1], f"chunk_{j:02d}.mp4") for j in range(len(edges) - 1)]
+        jobs = [(edges[j], edges[j + 1], os.path.join(out, f"chunk_{j:02d}.mp4")) for j in range(len(edges) - 1)]
         with Pool(nw) as pool:
             outs = pool.map(render_chunk, jobs)
-        with open("chunks.txt", "w") as f:
+        with open(os.path.join(out, "chunks.txt"), "w") as f:
             for o in outs: f.write(f"file '{o}'\n")
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "chunks.txt",
-                        "-c", "copy", "-movflags", "+faststart", "topex_mission.mp4"], check=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", os.path.join(out, "chunks.txt"),
+                        "-c", "copy", "-movflags", "+faststart", os.path.join(out, "SWARM_mission_v2_full.mp4")], check=True)
         for o in outs: os.remove(o)
-        print("wrote topex_mission.mp4", NF, "frames")
+        print("wrote SWARM_mission_v2_full.mp4", NF, "frames")

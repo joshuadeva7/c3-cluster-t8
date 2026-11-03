@@ -46,7 +46,7 @@ double LEADK[3] = {0, 0, 0};          // extra injection lag per craft [rad], sh
 const double AIM_Y    = -5000.0;      // aim point after transfer: 5 km behind on V-bar [m]
 const double KOZ      = 22.0;         // TOPEX keep-out / precision standoff (STM rows 1, 10) [m]
 const double APPROACH_SPHERE = 200.0; // approach ellipsoid / sphere [m]
-const double DOCK_R   = 2.6;          // docker CoM to TOPEX CoM at capture, inside gripper reach 1.211-2.611 m [m]
+const double DOCK_R   = 3.9;          // docker CoM to TOPEX CoM at capture: TOPEX aft hardware reaches 3.32 m (topex.stl) + SWARM gripper base 0.50 m ahead of its bus centre (SWARM Assembly.SLDASM) [m]
 // vehicle / propulsion (midterm report Section 4, STM)
 const double M_WET    = 166.407;      // wet mass per spacecraft [kg] (TRR budgets 'Mass Budget' E3+E7+E12+E16+E21+E31+E35+E38)
 const double F_HALL   = 0.039;        // BHT-600 thrust [N]

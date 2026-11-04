@@ -30,3 +30,8 @@ New work lives here. Nothing outside `v2/` is touched. Merge later.
 - Full render: `python3 mission_anim.py` at full scale (1080p, 30 fps, ~10 min).
 - CAD: SWARM (arms extended/retracted) and TOPEX-Poseidon_scaled meshes are decoded from the display meshes stored inside the native SolidWorks files (`cad_extract/`, `build_cad_meshes.py`). Render-ready caches are in `assets/` (`cad_render.npz`, `cad/*_lite.stl`, `cad/topex.stl`).
 - Final video: `video/SWARM_mission_v2_full.mp4` (1080p, 30 fps, 102 s).
+
+### 2026-11-04 SWARM model swap
+- SWARM meshes now come from Daniel's `SWARMAssembly_for_sim_2026-11-04.glb` (2 Sparkwing 3-panel wings, fixed-length gripper arm) via `build_swarm_glb.py`; TOPEX, timing, text and camera unchanged.
+- The 147 MB source GLB is over GitHub's limit; `assets/cad/SWARMAssembly_2026-11-04_decimated.glb` is the decimated render mesh in animation body axes (m).
+- Grip clocking kept at DOCK_CLOCK = -90 deg: pads close on the aft bus end, clear of TOPEX's dish (min pad-to-TOPEX 0.02 m on the bus).

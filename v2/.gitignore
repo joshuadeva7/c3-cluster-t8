@@ -3,3 +3,4 @@ __pycache__/
 assets/cad/swarm_extended.stl
 assets/cad/swarm_retracted.stl
 *.chunk*
+video/*_prev_*.mp4

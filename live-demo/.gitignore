@@ -1,0 +1,4 @@
+__pycache__/
+*.csv
+mac/_src/
+mac/results/

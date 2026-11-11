@@ -4,7 +4,7 @@
 # Output: mac/results/<timestamp>/results.jsonl + summary.md (+ e2e loop, if pyrender works on this Mac).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; LD="$(dirname "$HERE")"
-CONDA="${CONDA:-/opt/miniconda3/bin/conda}"; source "$("$CONDA" info --base)/etc/profile.d/conda.sh"; conda activate swarm-live
+VENV="${VENV:-$HOME/swarm-live/.venv}"; source "$HERE/venv.sh" || exit 1   # python venv on the system python3 3.11
 source "$HERE/ensure_src.sh" || exit 1; export PYTORCH_ENABLE_MPS_FALLBACK=1   # any op MPS lacks falls back to CPU (counted in the timing)
 OUT="$HERE/results/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$OUT"; cd "$LD"
 { sysctl -n machdep.cpu.brand_string; sysctl -n hw.memsize; sw_vers; python -c "import torch,onnxruntime as o,coremltools as c;print(torch.__version__,o.__version__,o.get_available_providers(),c.__version__)"; } > "$OUT/system.txt" 2>&1

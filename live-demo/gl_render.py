@@ -8,14 +8,22 @@ import sys, numpy as np, moderngl
 VS = """#version 330
 uniform mat4 M; uniform mat3 Mn; uniform mat4 V; uniform mat4 P;
 in vec3 in_p; in vec3 in_n; in vec3 in_c;
-out vec3 n_w; out vec3 c; out float zc;
-void main(){ vec4 pw = M*vec4(in_p,1.0); vec4 pc = V*pw; zc = pc.z; n_w = Mn*in_n; c = in_c; gl_Position = P*pc; }"""
+out vec3 n_w; out vec3 c; out float zc; out vec3 p_w;
+void main(){ vec4 pw = M*vec4(in_p,1.0); p_w = pw.xyz; vec4 pc = V*pw; zc = pc.z; n_w = Mn*in_n; c = in_c; gl_Position = P*pc; }"""
 FS = """#version 330
-uniform vec3 sun; uniform float amb; uniform float kd; uniform vec3 cam_fwd_w; uniform float kh;
-in vec3 n_w; in vec3 c; in float zc;
+uniform vec3 sun; uniform float amb; uniform float kd; uniform vec3 cam_fwd_w; uniform vec3 cam_pos_w; uniform float kh; uniform float hd0; uniform float v2look;
+in vec3 n_w; in vec3 c; in float zc; in vec3 p_w;
 out vec4 f_col;
 void main(){ vec3 n = normalize(n_w); if (!gl_FrontFacing) n = -n;
-  float l = max(dot(n, sun), 0.0); float h = max(dot(n, -cam_fwd_w), 0.0);
+  if (v2look > 0.5) {   // the v2 video's flat shading: face colour (sRGB) x (0.32 + 0.78 sun + 0.22 earthshine from -x)
+    if (dot(n, cam_pos_w - p_w) < 0.0) n = -n;
+    float sh = 0.32 + 0.78 * max(dot(n, sun), 0.0) + 0.22 * max(-n.x, 0.0);
+    f_col = vec4(clamp(pow(c, vec3(1.0/2.2)) * sh, 0.0, 1.0), 1.0); return; }
+  float l = max(dot(n, sun), 0.0);
+  // illuminator: point spotlight at the camera, inverse-square-like falloff and a soft 30 deg cone (no flat grey wash)
+  vec3 L = cam_pos_w - p_w; float d = length(L); L /= max(d, 1e-4);
+  float cone = smoothstep(0.80, 0.97, dot(-L, cam_fwd_w));
+  float h = max(dot(n, L), 0.0) * cone / (1.0 + (d / hd0) * (d / hd0));
   vec3 col = c*(amb + kd*l + kh*h); f_col = vec4(pow(clamp(col,0.0,1.0), vec3(1.0/2.2)), 1.0); }"""
 
 def make_context(standalone=True):
@@ -44,7 +52,7 @@ class GLScene:
             col = self.ctx.renderbuffer((w, h), 4); d = self.ctx.depth_texture((w, h))
             self.fbos[(w, h)] = self.ctx.framebuffer(color_attachments=[col], depth_attachment=d)
         return self.fbos[(w, h)]
-    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0):
+    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False):
         n, f = znear, zfar
         P = np.array([[2 * K[0, 0] / W, 0, 2 * K[0, 2] / W - 1, 0],
                       [0, -2 * K[1, 1] / H, 1 - 2 * K[1, 2] / H, 0],
@@ -54,8 +62,9 @@ class GLScene:
         self.ctx.enable(moderngl.DEPTH_TEST); self.ctx.disable(moderngl.CULL_FACE)
         s = np.asarray(sun_w, float); s = s / np.linalg.norm(s)
         pr = self.prog; pr["V"].write(V.T.astype("f4").tobytes()); pr["P"].write(P.T.astype("f4").tobytes())
-        pr["sun"].value = tuple(s); pr["amb"].value = self.amb; pr["kd"].value = self.kd
+        pr["sun"].value = tuple(s); pr["amb"].value = self.amb if amb_override is None else float(amb_override); pr["kd"].value = self.kd
         pr["kh"].value = float(headlight); pr["cam_fwd_w"].value = tuple(R_IC[:, 2])
+        pr["cam_pos_w"].value = tuple(np.asarray(p_IC, float)); pr["hd0"].value = 2.5; pr["v2look"].value = 1.0 if v2look else 0.0
         for o in self.objs:
             if not o["visible"]: continue
             M = o["pose"]; pr["M"].write(M.T.astype("f4").tobytes())

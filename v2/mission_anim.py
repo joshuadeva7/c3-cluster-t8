@@ -32,6 +32,10 @@ from matplotlib.collections import LineCollection, PolyCollection
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.environ.get("SIM_DIR", os.path.join(HERE, "out"))
+# V2_CUTSCENE=1: the live-demo cutscene variant (render_cutscene.py): no text, labels or HUD; the camera levels out to
+# CUT_EL deg by the formation hold (v = CUT_V) so Earth leaves the frame, and the live sim continues from that exact state.
+CUTSCENE = os.environ.get("V2_CUTSCENE") == "1"
+CUT_V, CUT_EL = 27.0, 8.0
 for f in glob.glob(os.path.join(HERE, "assets", "*.ttf")):
     fm.fontManager.addfont(f)
 
@@ -290,12 +294,18 @@ LKD = PchipInterpolator(LK[:, 0], np.log(LK[:, 5]))
 LKX = PchipInterpolator([0, 21.0, 24.0, 27.5, 31.0, 200], [-1600, -1600, -1100, -250, 0, 0])   # radial: arrival is ~3 km low
 
 
+def cut_el(v, el):
+    s = smoother((v - 22.5) / (CUT_V - 22.5)); return el * (1 - s) + CUT_EL * s
+
+
 def camera(i):
     v = VV[i]; frame = "eci" if v < V_SW else "lvlh"
     C, r = lvlh(TG[i])
     if frame == "lvlh":
         T = np.array([float(LKX(v)), float(LKI[0](v)), float(LKI[1](v))])
-        D = dir_lvlh(float(LKI[2](v)), float(LKI[3](v))); d = float(np.exp(LKD(v)))
+        el_ = float(LKI[3](v))
+        if CUTSCENE: el_ = cut_el(v, el_)
+        D = dir_lvlh(float(LKI[2](v)), el_); d = float(np.exp(LKD(v)))
         if v > 77.0:   # frame the cluster (and TOPEX until it is left behind) as they leave
             pc = [relv(k, TG[i] - T_ARR)[0] for k in range(3)]
             lo, hi = np.min(pc + [np.zeros(3)], axis=0), np.max(pc + [np.zeros(3)], axis=0)
@@ -570,6 +580,7 @@ def draw_frame(ax, i):
     else:
         draw_lvlh(ax, cam, i, v, trel, sun, labels)
 
+    if CUTSCENE: labels = []
     for (x, y, t, col, a, dx, dy) in labels:
         if a <= 0.01 or not np.isfinite(x): continue
         if (x + dx > W - 620 and y + dy < 300) or (y + dy < 175): dy = abs(dy)
@@ -580,7 +591,7 @@ def draw_frame(ax, i):
                 ha="left" if dx > 0 else "right", va="center", zorder=20)
 
     ax.imshow(VIG, extent=(0, W, H, 0), interpolation="bilinear", zorder=25)
-    draw_hud(ax, cam, i, v, tg, trel)
+    if not CUTSCENE: draw_hud(ax, cam, i, v, tg, trel)
 
 
 def glow_line(ax, xs, ys, col, a, lw=1.4, z=6, ls="-"):

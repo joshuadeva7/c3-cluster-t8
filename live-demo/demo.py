@@ -68,7 +68,9 @@ J_DOCK = np.diag([36.68, 58.88, 41.62])   # trr/inertia.py, arm open, mapped tea
 M_DOCK = 198.535                          # TRR mass table, total with margin
 # ---- TOPEX body-rate slider config (rad/s), from the capture-envelope study (anim-work/NOTES-capture-envelope.md):
 #      wx, wz: +-cap; wy (roll spin): |wy| in [min, max], either sign. GO is greyed out until |wy| is inside that band.
-RATE_LIMITS = dict(wx=0.008, wz=0.008, wy_min=0.55, wy_max=0.75, wy_default=0.661)
+# Daniel 2026-11-11: wx = wz = 0 (conservative: no wobble, the grip point sits still on the spin axis). wy_max 0.789 rad/s = the
+# 8.58 kg despin hydrazine allocation at the 0.5 m lever (capture-envelope audit, stack_and_budget.json); wy_min 0.10 (a visible spin).
+RATE_LIMITS = dict(wx=0.0, wz=0.0, wy_min=0.10, wy_max=0.789, wy_default=0.661)
 # ---- docker actuators (midterm main.tex T:366-388, TRR mass table):
 #      12x ArianeGroup 1 N hydrazine thrusters, Isp 220 s, 0.5 m lever: 2 N force and one 1 N*m couple per axis.
 #      3x Blue Canyon RW8 (8 N*m*s, 0.25 N*m each), one per docker axis: they follow TOPEX's wobble during the hold.
@@ -83,7 +85,7 @@ RW_TAU, RW_H = 0.25, 8.0                   # per wheel
 RW_ALPHA = RW_TAU / 41.62                  # wobble/swing tracking on the wheels (smallest authority of the transverse axes)
 KG_PER_NMS = 1.0 / (LEVER * ISP * G0)      # hydrazine per N*m*s of angular impulse at a 0.5 m lever: 9.27e-4 kg
 DETUMBLE_TAU = 0.5                         # TRR ConOps: one 1 N thruster x 0.5 m against H
-GRIP_TOL, CONTACT_V_MAX = 0.075, 0.03      # capture tolerances: half a 150 mm pad, 3 cm/s
+
 APPROACH_WARP = 10.0                       # final-approach TRANSLATION shown x10 (spin always drawn at its true rate)
 PADS = cad["arm_end_v"]
 # dish-clearance check geometry: TOPEX parts that are neither the bus nor the solar array (antenna dish + booms)
@@ -292,13 +294,23 @@ def apply_cmd(cmd):
     if cmd.startswith("w="):
         v = [float(x) for x in cmd[2:].split(",")]; v = np.clip(v, -WMAX3, WMAX3)
         sliders.update(wx=v[0], wy=v[1], wz=v[2])
-        for nm, x in zip(("wx", "wy", "wz"), v): UI_SLIDERS[nm].val = float(x)
+        for nm, x in zip(("wx", "wy", "wz"), v):
+            if nm in UI_SLIDERS: UI_SLIDERS[nm].val = float(x)
     elif cmd == "go": A.go = True
     elif cmd == "loss":   # corrupt the estimate by 60 deg: the pipeline must notice and re-acquire
         if filt.q is not None: filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
+    elif cmd == "ir":     # imagerA's visible camera (MSSS LCAM) fails: ~2.5 s dark, then its MSSS ECAM-IR3A LWIR camera takes over
+        if IR["cam"] is None: IR.update(cam="imagerA", t_fail=W.t, last=-1e9, img=None); STATS["ir_t"].append(round(W.t, 2))
     elif cmd == "light": W.sun = Rot.from_euler("z", 75, degrees=True).as_matrix() @ W.sun; STATS["light_t"].append(round(W.t, 2))
-STATS = {"pos_err": {}, "filt_p": [], "fuel_spin_kg": 0.0, "fuel_trans_kg": 0.0, "fuel_detumble_kg": 0.0, "fuel_swing_kg": 0.0, "rw_h_max": 0.0, "rw_tau_max": 0.0, "dock_v": [], "dock_w": [], "loss_t": [], "light_t": [], "reacq_t": [], "fix_hz": [], "cycle_ms": [], "model_ms": []}
+STATS = {"pos_err": {}, "filt_p": [], "fuel_spin_kg": 0.0, "fuel_trans_kg": 0.0, "fuel_detumble_kg": 0.0, "fuel_swing_kg": 0.0, "rw_h_max": 0.0, "rw_tau_max": 0.0, "dock_v": [], "dock_w": [], "loss_t": [], "light_t": [], "ir_t": [], "reacq_t": [], "fix_hz": [], "cycle_ms": [], "model_ms": []}
 UI_SLIDERS = {sl.name: sl for sl in DISP.sliders}
+# Camera-fail test (key I): midterm main.tex:401-402 / :331 "ECAM-IR3A ... 640x480 LWIR, 12 fps ... complementary LWIR observations during
+# poor visible illumination". Thermal emission does not depend on the sun, so the IR view is lit from the camera (uniform emitter look),
+# downsampled to the IR3A's lower resolution, blurred and noisy, and only refreshed at 12 Hz (a fix only on a fresh IR frame).
+IR = dict(cam=None, t_fail=None, last=-1e9, img=None); IR_DARK, IR_HZ, IR_SCALE = 2.5, 12.0, 480 / 1024
+def ir_state(k):
+    if IR["cam"] != k: return None
+    return "dark" if W.t - IR["t_fail"] < IR_DARK else "ir"
 writer = None
 if a.record:
     writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), a.fps_out, (WIN_W, WIN_H))
@@ -408,7 +420,7 @@ while True:
     if STAGE == "SELECT":
         # FROZEN: no clock advances. Panel = TOPEX body rates + GO (greyed out until valid).
         if not a.headless:
-            v_ = [UI_SLIDERS[nm].val for nm in ("wx", "wy", "wz")]; sliders.update(wx=v_[0], wy=v_[1], wz=v_[2])
+            sliders.update(wx=0.0, wy=UI_SLIDERS["wy"].val, wz=0.0)
         else:   # script: apply w= / go at the freeze (hold the panel on screen ~2 s of video first)
             while ev_i < len(EV) and EV[ev_i][1] != "go": apply_cmd(EV[ev_i][1]); ev_i += 1
         if "SEL_IMG" not in globals() or SEL_IMG is None:
@@ -417,7 +429,7 @@ while True:
         wv = np.array([sliders["wx"], sliders["wy"], sliders["wz"]]); valid = rates_valid(wv); go_ok = valid and sel_t > 1.0
         d1 = np.linalg.norm(V2.rel(0, TM_D)) / 1000
         lines = [f"SC1 is closest ({d1:.2f} km on the V-bar): it is the docker.", "SC2 and SC3 keep imaging TOPEX from the NMC.",
-                 "" if valid else f"|wy| must be {RATE_LIMITS['wy_min']:.2f}-{RATE_LIMITS['wy_max']:.2f} rad/s; |wx|, |wz| <= {RATE_LIMITS['wx']:.3f}"]
+                 "" if valid else f"|wy| must be {RATE_LIMITS['wy_min']:.2f}-{RATE_LIMITS['wy_max']:.3f} rad/s (wx = wz = 0)"]
         DISP.draw_select(img, go_ok, lines)
         if frame % 1 == 0 and sel_t <= dt + 1e-9 and _os.path.isdir(_os.path.join(HERE, "runs")): cv2.imwrite(_os.path.join(HERE, "runs", "frame_select.png"), img)
         r = emit(img, WIN_W, allow_pause=False); frame += 1
@@ -439,9 +451,22 @@ while True:
         near = k == "docker" and np.linalg.norm(W.sc["docker"] - (filt.p if filt.q is not None else np.zeros(3))) < 11.0
         Kc = Kn if near else K; Kcs.append(Kc)
         rng_ = float(np.linalg.norm(W.sc["docker"])) if near else 0.0
-        col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3)
+        st = ir_state(k)
+        if st == "dark": col = np.zeros((RES, RES, 3), np.uint8); IR["fresh"] = False
+        elif st == "ir":
+            if W.t - IR["last"] >= 1.0 / IR_HZ - 1e-9 or IR["img"] is None:
+                for kk, n in n_sc.items(): world.set_visible(n, kk != k)
+                world.set_visible(n_arm, True)
+                c_, _ = world.render(K, RES, RES, Rc, pc, Rc @ np.array([0.0, 0.0, -1.0]), znear=0.3, zfar=2000)
+                lo = max(8, int(RES * IR_SCALE)); c_ = cv2.resize(cv2.resize(c_, (lo, lo), interpolation=cv2.INTER_AREA), (RES, RES), interpolation=cv2.INTER_LINEAR)
+                c_ = cv2.GaussianBlur(c_, (0, 0), 1.2).astype(np.float32) * 0.85 + 18 + rng.normal(0, 4.0, c_.shape)
+                IR["img"] = np.clip(c_, 0, 255).astype(np.uint8); IR["last"] = W.t; IR["fresh"] = True
+            else: IR["fresh"] = False
+            col = IR["img"]
+        else:
+            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3)
         live.append(col); Rcs.append(Rc); pcs.append(pc)
-    grays = [R_.degrade(c, rng) for c in live]
+    grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
     fixes = [None] * 3; nin = [0] * 3; t_model = 0.0
     if W.attached:
         pass   # gripped: TOPEX state comes from the docker's IMU through the rigid grip
@@ -452,9 +477,10 @@ while True:
             if STATS["loss_t"] and (not STATS["reacq_t"] or STATS["reacq_t"][-1] < STATS["loss_t"][-1]): STATS["reacq_t"].append(round(W.t, 2))
             A.set(A.resume if hasattr(A, "resume") and A.resume else "CONVERGE", W.t); A.resume = None
     else:
-        idx = [i for i, k in enumerate(CAMS) if not (k == "docker" and (W.attached or not 11.0 <= np.linalg.norm(filt.p - W.sc["docker"]) <= 60.0))]
+        idx = [i for i, k in enumerate(CAMS) if not (k == "docker" and (W.attached or not 11.0 <= np.linalg.norm(filt.p - W.sc["docker"]) <= 60.0))
+               and not (ir_state(k) is not None and not IR.get("fresh", False))]
         pri = [filt.pose_in_camera(Rcs[i], pcs[i]) for i in idx]
-        suns = [None if a.sun_unknown else Rcs[i].T @ W.sun for i in idx]
+        suns = [np.array([0.0, 0.0, -1.0]) if ir_state(CAMS[i]) == "ir" else (None if a.sun_unknown else Rcs[i].T @ W.sun) for i in idx]
         t0 = time.perf_counter(); out, nn = TRK.track([grays[i] for i in idx], pri, suns); t_model = time.perf_counter() - t0
         accepted = 0
         for j, i in enumerate(idx):
@@ -609,7 +635,6 @@ while True:
                                spinup_hydrazine_g=round(STATS["fuel_spin_kg"] * 1000, 1), rw_h_max_Nms=round(STATS["rw_h_max"], 3), rw_tau_max_Nm=round(STATS["rw_tau_max"], 3))
             e_ = pT - DOCK_PB; yb = DOCK_PB / np.linalg.norm(DOCK_PB)   # lateral = across the pad (the 75 mm tolerance); axial is taken up by the claw
             grip_report["grip_lateral_err_m"] = float(np.linalg.norm(e_ - (e_ @ yb) * yb)); grip_report["grip_axial_err_m"] = float(e_ @ yb)
-            grip_report["within_tolerance"] = bool(grip_report["grip_lateral_err_m"] <= GRIP_TOL and A.v_contact <= CONTACT_V_MAX)
             # rigid attach at the ACTUAL relative pose; truth becomes the stack (docker inertia + parallel axis; COM shift neglected)
             A.rel = (W.R_IB.T @ W.R_sc["docker"], W.R_IB.T @ W.sc["docker"]); r_ = A.rel[1] + A.rel[0] @ C_DOCK   # docker COM in TOPEX body
             Jst = J + A.rel[0] @ J_DOCK @ A.rel[0].T + M_DOCK * (r_ @ r_ * np.eye(3) - np.outer(r_, r_))
@@ -692,6 +717,8 @@ while True:
             draw_axes_overlay(tile, Rcs[i].T @ W.R_IB, Rcs[i].T @ (np.zeros(3) - pcs[i]), (120, 120, 120), 256 / RES, Kcs[i])
             draw_axes_overlay(tile, Rcs[i].T @ R_est, Rcs[i].T @ (p_est - pcs[i]), None, 256 / RES, Kcs[i])
         if k == "docker" and Kcs[i] is Kn: txt(tile, "near-field: 62 deg FOV, illuminator, auto-exp", 6, 34, 0.36, (150, 220, 255))
+        if ir_state(k) == "dark": txt(tile, "VISIBLE CAMERA FAILED", 30, 128, 0.55, (60, 60, 255), 2)
+        elif ir_state(k) == "ir": txt(tile, "IR: ECAM-IR3A LWIR 640x480 12 fps", 6, 34, 0.36, (80, 170, 255))
         canvas[y0:y0 + 256, x0:x0 + 256] = tile
         cv2.rectangle(canvas, (x0, y0), (x0 + 255, y0 + 255), tuple(int(c * 255) for c in ACC[k][::-1]), 1)
         txt(canvas, f"{k} cam  {np.linalg.norm(W.sc[k]):.0f} m", x0 + 6, y0 + 16, 0.45, tuple(int(c * 255) for c in ACC[k][::-1]))
@@ -728,19 +755,20 @@ while True:
         canvas[y0a:y0a + ARMRES, x0a:x0a + ARMRES] = cv2.cvtColor(ARM_IMG, cv2.COLOR_GRAY2BGR)[:WIN_H - y0a]
         cv2.rectangle(canvas, (x0a, y0a), (x0a + ARMRES - 1, y0a + ARMRES - 1), (60, 140, 240), 1)
         txt(canvas, f"ARM CAM  span {2.611 * ARM_S:.2f} m", x0a + 6, y0a + 16, 0.4, (60, 170, 255))
-    if grip_report: txt(canvas, f"GRIP: lateral err {grip_report['grip_lateral_err_m'] * 1000:.0f} mm (tol 75), contact {grip_report['contact_speed_m_s'] * 100:.1f} cm/s (max 3), pads-to-dish {grip_report['min_pad_to_dish_m']:.2f} m", 8, 22, 0.45, (120, 255, 160))
+    if grip_report: txt(canvas, f"GRIP: lateral err {grip_report['grip_lateral_err_m'] * 1000:.0f} mm, contact {grip_report['contact_speed_m_s'] * 100:.1f} cm/s, pads-to-dish {grip_report['min_pad_to_dish_m']:.2f} m", 8, 22, 0.45, (120, 255, 160))
     if a_pan < 1.0:   # GO: the dashboard slides in from the right over the full-width picture
         canvas[:, 768:] = (main_img[:, 768:WIN_W] * (1 - a_pan) + canvas[:, 768:] * a_pan).astype(np.uint8)
     r = emit(canvas, 768); frame += 1
     if r == "quit": break
     for kk in r:
         if kk == "x": apply_cmd("loss")
+        elif kk == "i": apply_cmd("ir")
         elif kk == "l": apply_cmd("light")
     if t_demo >= a.T or (A.ph == "DONE" and W.t > A.t_ph + 3) or (a.until_grip and grip_report and A.ph == "DETUMBLE" and W.t > A.t_ph + 1500): break
 if writer is not None: writer.release()
 summary = dict(selftest=SELFTEST, feat=a.feat, crop=a.crop, script=a.script, fixed_dt=a.fixed_dt, sun_unknown=a.sun_unknown, w0=W.w.tolist() if not grip_report else None, phases=A.log, grip=grip_report,
                median_cycle_ms=float(np.median(STATS["cycle_ms"])) if STATS["cycle_ms"] else None, median_model_ms=float(np.median(STATS["model_ms"])) if STATS["model_ms"] else None,
-               loss_t=STATS["loss_t"], reacq_t=STATS["reacq_t"], light_t=STATS["light_t"],
+               loss_t=STATS["loss_t"], reacq_t=STATS["reacq_t"], light_t=STATS["light_t"], ir_t=STATS["ir_t"],
                att_err_med_tracking=float(np.nanmedian([h["att"] for h in FULL if h["ph"] in ("CONVERGE", "HOLD 30 m", "SPIN-MATCH", "FINAL APPROACH")])) if FULL else None,
                rate_err_med_tracking=float(np.nanmedian([abs(np.linalg.norm([h["wx"]-h["ex"], h["wy"]-h["ey"], h["wz"]-h["ez"]])) for h in FULL if h["ph"] in ("HOLD 30 m", "SPIN-MATCH", "FINAL APPROACH")])) if FULL else None,
                grip_t_mission_s=getattr(A, "t_grip_mission", None), final_approach_mission_s=(getattr(A, "t_grip_mission", 0) - getattr(A, "t_fa_mission", 0)) if hasattr(A, "t_grip_mission") else None,

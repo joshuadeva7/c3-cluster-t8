@@ -4,7 +4,7 @@ sliders and GO button are drawn into the canvas and driven by pyglet mouse/key e
 GL context. Works on macOS (Cocoa, GL 3.3 core) and Linux/X11.
 The picture fills the whole window (no control band). The only on-screen controls are the docker-selection panel
 (mode "select": 3 TOPEX body-rate sliders + GO, GO greyed out until it is valid). Keys: Enter/S start, Space skip the
-cutscene, G = GO, P = pause, Esc/Q = quit; hidden test keys X (tracking loss) and L (rotate the sun)."""
+cutscene, G = GO, P = pause, Esc/Q = quit; hidden test keys X (pose error), L (rotate the sun), I (visible camera fails -> infrared)."""
 import numpy as np, moderngl, cv2
 import gl_render
 
@@ -43,7 +43,8 @@ class Display:
         self.go_enabled = False
         x0, y0, x1, y1 = self.PANEL
         wm = wmax if isinstance(wmax, (tuple, list)) else (wmax,) * 3   # per-axis slider range
-        self.sliders = [Slider(n, x0 + 40, y0 + 170 + 40 * i, 280, -m, m, v) for i, (n, v, m) in enumerate(zip(("wx", "wy", "wz"), w0, wm))]
+        axes = [(n, v, m) for n, v, m in zip(("wx", "wy", "wz"), w0, wm) if m > 0]   # an axis capped at 0 gets no slider (Daniel: wx = wz = 0)
+        self.sliders = [Slider(n, x0 + 40, y0 + 190 + 40 * i, 280, -m, m, v) for i, (n, v, m) in enumerate(axes)]
         self.go = Button("GO", "g", (x0 + x1) // 2 - 80, y1 - 62, 160, 40)
         if headless:
             self.ctx = gl_render.make_context(True); self.win = None; return
@@ -61,7 +62,7 @@ class Display:
         @w.event
         def on_key_press(sym, mod):
             import pyglet.window.key as k
-            m = {k.G: "g", k.X: "x", k.L: "l", k.Q: "q", k.ESCAPE: "q", k.SPACE: " ", k.R: "r", k.ENTER: "\r", k.RETURN: "\r", k.S: "\r", k.P: "p"}
+            m = {k.G: "g", k.X: "x", k.L: "l", k.I: "i", k.Q: "q", k.ESCAPE: "q", k.SPACE: " ", k.R: "r", k.ENTER: "\r", k.RETURN: "\r", k.S: "\r", k.P: "p"}
             if sym in m: self.events.append(("key", m[sym]))
             return True                                        # don't let pyglet close on ESC by itself
         @w.event
@@ -88,7 +89,7 @@ class Display:
         cv2.rectangle(img, (x0, y0), (x1, y1), (120, 120, 120), 1)
         cv2.putText(img, "DOCKER SELECTION", (x0 + 40, y0 + 46), F, 0.85, (90, 175, 245), 2, cv2.LINE_AA)
         for j, ln in enumerate(lines): cv2.putText(img, ln, (x0 + 40, y0 + 80 + 22 * j), F, 0.5, (215, 215, 215), 1, cv2.LINE_AA)
-        cv2.putText(img, "TOPEX body rates (spin starts on GO)", (x0 + 40, y0 + 140), F, 0.5, (170, 200, 230), 1, cv2.LINE_AA)
+        cv2.putText(img, "TOPEX roll spin rate wy (spin starts on GO)", (x0 + 40, y0 + 140), F, 0.5, (170, 200, 230), 1, cv2.LINE_AA)
         for s in self.sliders: s.draw(img, True)
         self.go.draw(img, hover=self.hover and go_enabled, enabled=go_enabled)
     def show(self, canvas_bgr, mode=None):

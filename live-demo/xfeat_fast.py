@@ -15,6 +15,8 @@ WEIGHTS = os.path.join(SRC, "accelerated_features", "weights", "xfeat.pt")
 # the likely culprit is the ANE evaluating the integer index arithmetic (idx % W, idx // W, idx up to 65535) in fp16,
 # which cannot represent integers above 2048 exactly. Use coreml-gpu (5.4 ms) instead of ALL/NE.
 GRAPH_VER = "v1"
+import threading
+_COREML_LOCK = threading.Lock()
 
 class XFeatGraph(nn.Module):
     def __init__(self, top_k=512, thr=0.05, B=6, H=256, W=256):
@@ -70,7 +72,7 @@ class Runner:
             self.s = ort.InferenceSession(path, so, providers=prov); self.used = self.s.get_providers(); self.run = self._onnx
         elif backend.startswith("coreml"):
             import coremltools as ct
-            fp32 = backend.endswith("32")
+            fp32 = backend.endswith("32")   # coreml-all32 / coreml-gpu32: fp32 compute (no ANE)
             path = os.path.join(cache, f"xfeat_{res}_{top_k}_b{batch}{'_fp32' if fp32 else ''}.mlpackage")
             if not os.path.exists(path):
                 tr = torch.jit.trace(g, ex)
@@ -78,7 +80,7 @@ class Runner:
                                compute_precision=ct.precision.FLOAT32 if fp32 else ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13)
                 m.save(path)
             cu = {"coreml-all": ct.ComputeUnit.ALL, "coreml-ne": ct.ComputeUnit.CPU_AND_NE, "coreml-gpu": ct.ComputeUnit.CPU_AND_GPU, "coreml-cpu": ct.ComputeUnit.CPU_ONLY,
-                  "coreml-all32": ct.ComputeUnit.ALL}[backend]
+                  "coreml-all32": ct.ComputeUnit.ALL, "coreml-gpu32": ct.ComputeUnit.CPU_AND_GPU}[backend]
             self.m = ct.models.MLModel(path, compute_units=cu); self.outnames = [o.name for o in self.m.get_spec().description.output]; self.run = self._coreml
         else: raise ValueError(backend)
 
@@ -88,7 +90,11 @@ class Runner:
             return kp.float().cpu().numpy(), sc.float().cpu().numpy(), d.float().cpu().numpy()
     def _onnx(self, x): return tuple(self.s.run(None, {"x": x}))
     def _coreml(self, x):
-        o = self.m.predict({"x": x}); vals = [np.asarray(o[n]) for n in self.outnames]
+        # serialize predict() and deep-copy every output out of the MLMultiArray-backed buffers before the next call
+        with _COREML_LOCK:
+            o = self.m.predict({"x": np.ascontiguousarray(x, dtype=np.float32).copy()})
+            vals = [np.array(o[n], dtype=np.float32, copy=True) for n in self.outnames]
+        del o
         vals.sort(key=lambda v: (v.ndim, v.shape[-1] if v.ndim else 0))   # sc (B,K) , kp (B,K,2), d (B,K,64)
         sc, kp, d = vals; return kp, sc, d
 

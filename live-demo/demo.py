@@ -15,7 +15,7 @@ from scipy.spatial.transform import Rotation as Rot
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 p = argparse.ArgumentParser()
-p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-gpu")
+p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-onnx-coreml")
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
 p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=120.0)
@@ -81,7 +81,7 @@ class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by th
         return self.scene.render(K, RES, RES, Rm.T, -Rm.T @ t, Rm.T @ s, znear=0.3, zfar=2000)
 ref = RefRenderer()
 Kn = R_.K_for(RES, 62.0)     # docker near-field camera (range < 11 m): wide FOV, close near plane, illuminator on
-ARMRES = 256; Ka = R_.K_for(ARMRES, 75.0)
+ARMRES = 256; Ka = R_.K_for(ARMRES, 88.0)
 def render_view(R_IC, p_IC, main=False, own=None, Kc=None, head=0.0, znear=0.3):
     for k, n in n_sc.items(): world.set_visible(n, k != own)   # a camera never sees its own bus
     world.set_visible(n_arm, own != "docker")
@@ -134,7 +134,7 @@ def selftest(trk, n=5):
     good = sum(1 for r in res if r[0] >= 15 and r[1] < 3.0)            # healthy on >= 3 of 5 poses (no one-pose fluke)
     return good >= 3 and px > 100, inl, err, ms, px
 FEAT = None; TRK = None; SELFTEST = []
-for cand in [a.feat] + [b for b in ("xfeat-coreml-gpu", "xfeat-onnx-coreml", "xfeat-coreml-cpu", "xfeat-coreml-all32", "xfeat-torch-mps", "xfeat-onnx-cpu", "orb") if b != a.feat]:
+for cand in [a.feat] + [b for b in ("xfeat-onnx-coreml", "xfeat-coreml-cpu", "xfeat-torch-mps", "xfeat-onnx-cpu", "orb") if b != a.feat]:
     try:   # fall back through backends if one can't load OR fails the known-pose self-test on this machine (logged)
         f_ = features.make(cand, **(kw if cand.startswith("xfeat-") else {})); f_.extract([np.zeros((a.crop, a.crop), np.uint8)] * 2)
         trk_ = T_.Tracker(ref, f_, crop_res=a.crop, iters=1); ok_, inl_, err_, ms_, px_ = selftest(trk_)
@@ -390,9 +390,18 @@ while t_demo < a.T and A.ph != "DONE" or (A.ph == "DONE" and W.t < A.t_ph + 3):
     if A.ph not in ("WAIT FOR GO", "ACQUIRE"): STATS["cycle_ms"].append(cyc * 1000); STATS["model_ms"].append(t_model * 1000)
     # ---- dashboard
     close = A.ph in ("FINAL APPROACH", "GRIP", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DONE")
-    tgt_c = 0.5 * W.sc["docker"] if close else np.array([0, -13.0, 0])          # close: frame TOPEX + docker together
-    MAIN_T = 0.95 * MAIN_T + 0.05 * tgt_c
-    MAIN_P = 0.95 * MAIN_P + 0.05 * ((tgt_c + np.array([0.55, -0.70, 0.40]) / np.linalg.norm([0.55, -0.70, 0.40]) * 21.0) if close else np.array([30.0, -38.0, 14.0]))
+    if close:
+        # frame TOPEX + docker side-on: look perpendicular to the (true) angular-momentum axis, which is inertially fixed
+        # (torque-free) or only shrinks in magnitude (detumble torque is anti-parallel to H), so the view does not swing.
+        Hw = W.R_IB @ (J_TRUE @ W.w); hn_ = np.linalg.norm(Hw)
+        if hn_ > 1e-3 or not hasattr(A, "view_dir"):
+            hu = Hw / hn_ if hn_ > 1e-3 else np.array([0, 1.0, 0]); side = np.cross(hu, [0.2, 0.3, 1.0]); side /= np.linalg.norm(side)
+            A.view_dir = 0.97 * getattr(A, "view_dir", side) + 0.03 * (side + 0.35 * np.cross(side, hu)); A.view_dir /= np.linalg.norm(A.view_dir)
+        tgt_c = 0.5 * W.sc["docker"]; pos_c = tgt_c + A.view_dir * (18.0 + 0.5 * np.linalg.norm(W.sc["docker"]))
+    else:
+        tgt_c = np.array([0, -13.0, 0]); pos_c = np.array([30.0, -38.0, 14.0])
+    MAIN_T = 0.93 * MAIN_T + 0.07 * tgt_c
+    MAIN_P = 0.93 * MAIN_P + 0.07 * pos_c
     Rm = look_at(MAIN_P, MAIN_T); mcol, _ = render_view(Rm, MAIN_P, main=True)
     canvas = np.zeros((WIN_H, WIN_W, 3), np.uint8)
     canvas[16:16 + 768, 0:768] = cv2.resize(mcol[:, :, ::-1], (768, 768), interpolation=cv2.INTER_LINEAR)
@@ -400,13 +409,14 @@ while t_demo < a.T and A.ph != "DONE" or (A.ph == "DONE" and W.t < A.t_ph + 3):
     if A.ph in ("FINAL APPROACH", "GRIP", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF") and np.linalg.norm(W.sc["docker"]) < 14:
         # docking/arm cam: on the docker above the arm, looking past the claw at the grip point (docker visible, illuminator on)
         Rd_, pd_ = W.R_sc["docker"], W.sc["docker"]
-        pa = pd_ + Rd_ @ np.array([0.55, 0.50, 0.55]); ta = pd_ + Rd_ @ np.array([1.30 * ARM_S, 1.45, 0.05])   # over the +x finger
-        acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 2]), pa, own=None, Kc=Ka, head=0.4, znear=0.05)
+        # overhead view of the claw: above the arm, behind the pad plane, looking down at both fingers and the grip face
+        pa = pd_ + Rd_ @ np.array([0.0, 0.55, 1.75]); ta = pd_ + Rd_ @ np.array([0.0, 1.20, 0.10])
+        acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.5, znear=0.05)
         ag = auto_expose(cv2.cvtColor(acol, cv2.COLOR_RGB2GRAY), 175)
         x0a, y0a = 768 - 262, 22
         canvas[y0a:y0a + 256, x0a:x0a + 256] = cv2.cvtColor(ag, cv2.COLOR_GRAY2BGR)
         cv2.rectangle(canvas, (x0a, y0a), (x0a + 255, y0a + 255), (60, 140, 240), 1)
-        txt(canvas, f"ARM CAM  claw span {2.611 * ARM_S:.2f} m", x0a + 6, y0a + 16, 0.42, (60, 170, 255))
+        txt(canvas, f"ARM CAM (overhead)  claw span {2.611 * ARM_S:.2f} m", x0a + 6, y0a + 16, 0.42, (60, 170, 255))
     if warp > 1.5:
         cv2.rectangle(canvas, (14, 650), (470, 704), (20, 20, 60), -1); cv2.rectangle(canvas, (14, 650), (470, 704), (80, 80, 255), 1)
         txt(canvas, f"TIME WARP x{warp:.0f}", 26, 684, 0.9, (120, 160, 255), 2)

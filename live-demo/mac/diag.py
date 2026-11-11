@@ -44,7 +44,7 @@ rc_, _ = T_.crop(cv2.cvtColor(ref.render(*pose_set[0][:2])[0], cv2.COLOR_RGB2GRA
 cv2.imwrite(f"{OUT}/crop_ref0.png", rc_)
 probe = [rc_] * 6
 base = None; D["backends"] = []
-for name in ("xfeat-onnx-cpu", "xfeat-coreml-all", "xfeat-coreml-ne", "xfeat-coreml-cpu", "xfeat-coreml-gpu", "xfeat-coreml-all32", "xfeat-onnx-coreml", "xfeat-torch-mps", "orb"):
+for name in ("xfeat-onnx-cpu", "xfeat-coreml-all", "xfeat-coreml-ne", "xfeat-coreml-cpu", "xfeat-coreml-gpu", "xfeat-coreml-gpu32", "xfeat-coreml-all32", "xfeat-onnx-coreml", "xfeat-torch-mps", "orb"):
     r = dict(backend=name)
     try:
         t0 = time.perf_counter(); f = features.make(name, res=CROP, top_k=512) if name.startswith("xfeat-") else features.make(name); r["load_s"] = round(time.perf_counter() - t0, 2)
@@ -69,6 +69,13 @@ for name in ("xfeat-onnx-cpu", "xfeat-coreml-all", "xfeat-coreml-ne", "xfeat-cor
             if out[0] is not None: out, nin = trk.track([g], [out[0]], [s_c])
             jobs, ims = trk.prepare([g], [(Rp, tp)], [s_c]); nm = len(f.match(*f.extract(ims)[:2])[0]) if ims else 0
             res.append(dict(matches=nm, inliers=int(nin[0]), rot_err_deg=round(R_.rot_err_deg(out[0][0], Rt), 3) if out[0] is not None else None))
+        if name.startswith("xfeat-coreml") and os.environ.get("DIAG_STRESS", "1") == "1":
+            # stability: 200 calls interleaved with GL renders (same process, like the demo); outputs must stay identical
+            ref0 = f.extract(probe); worst = 0.0; t0 = time.perf_counter()
+            for k in range(200):
+                ref.render(*pose_set[k % 5][:2]); ok_ = f.extract(probe)
+                worst = max(worst, float(np.abs(ok_[0][0] - ref0[0][0]).max()), float(np.abs(ok_[0][1][0] - ref0[0][1][0]).max()))
+            r["stress_200_calls_max_output_change"] = round(worst, 6); r["stress_s"] = round(time.perf_counter() - t0, 2)
         r["known_pose"] = res; r["known_pose_success"] = float(np.mean([x["rot_err_deg"] is not None and x["rot_err_deg"] < 5 for x in res]))
     except Exception as ex: r["error"] = repr(ex)[:400]; r["trace"] = traceback.format_exc()[-1500:]
     D["backends"].append(r); log(json.dumps({k: v for k, v in r.items() if k not in ("trace", "call_ms_10")})[:900])

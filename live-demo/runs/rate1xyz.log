@@ -1,0 +1,8 @@
+[t=   1.10] ACQUIRE
+[t=   1.20] CONVERGE
+[t=   5.70] HOLD 30 m
+[t=   7.80] SPIN-MATCH
+[t=  27.20] FINAL APPROACH
+[t=  53.50] GRIP
+[t=  53.60] DETUMBLE
+{"feat": "xfeat-onnx-cpu", "crop": 192, "script": "0:w=0.577,0.577,0.577;1:go", "fixed_dt": 0.1, "sun_unknown": false, "phases": [[1.1, "ACQUIRE"], [1.2, "CONVERGE"], [5.7, "HOLD 30 m"], [7.8, "SPIN-MATCH"], [27.2, "FINAL APPROACH"], [53.5, "GRIP"], [53.6, "DETUMBLE"]], "grip": {"t": 53.6, "grip_pos_err_m": 0.4599533343054462, "grip_att_err_deg": 0.691157828149128, "rel_rate_true_deg_s": 1.1684540597110926, "min_pad_to_dish_m": 3.9583281768852436, "min_pad_to_topex_m": 0.20823339092367396, "topex_rate_deg_s": 57.91297164488861}, "median_cycle_ms": 152.39743500569602, "median_model_ms": 75.04957849596394, "loss_t": [], "reacq_t": [], "light_t": [], "att_err_med_tracking": 0.3685549597541149, "rate_err_med_tracking": 0.2052984326610659, "max_docker_speed_m_s": 30.787045193452286, "max_docker_rate_deg_s": 441.5235921477224, "t_demo": 70.0000000000003, "t_sim": 4973.6, "rel_rate_true_final_approach": 1.0143160723531897}

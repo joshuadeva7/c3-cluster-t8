@@ -22,11 +22,11 @@ class Tracker:
         self.r = renderer; self.f = feat; self.cr = crop_res; self.iters = iters; self.min_inl = min_inl
         self.K = renderer.K; self.Kinv = np.linalg.inv(self.K)
 
-    def prepare(self, live_gray_list, priors):
+    def prepare(self, live_gray_list, priors, suns=None):
         """render refs + crops for a batch of cameras; returns per-camera dicts and the image list to extract."""
         jobs, ims = [], []
-        for g, (R0, t0) in zip(live_gray_list, priors):
-            col, dep = self.r.render(R0, t0)
+        for k, (g, (R0, t0)) in enumerate(zip(live_gray_list, priors)):
+            col, dep = self.r.render(R0, t0) if suns is None else self.r.render(R0, t0, sun_cam=suns[k])
             roi = roi_from_mask(dep > 0)
             if roi is None: jobs.append(None); continue
             c, s = roi
@@ -54,10 +54,10 @@ class Tracker:
         rv, tv = cv2.solvePnPRefineLM(Xb[inl], pl[ok][inl].astype(np.float64), self.K, None, rv, tv)
         return cv2.Rodrigues(rv)[0], tv[:, 0], len(inl)
 
-    def track(self, live_gray_list, priors):
+    def track(self, live_gray_list, priors, suns=None):
         out = list(priors); cur = list(priors); n_in = [0] * len(priors)
         for _ in range(self.iters):
-            jobs, ims = self.prepare(live_gray_list, cur)
+            jobs, ims = self.prepare(live_gray_list, cur, suns)
             feats = self.f.extract(ims) if ims else []
             k = 0
             for ci, job in enumerate(jobs):

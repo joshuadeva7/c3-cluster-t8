@@ -25,7 +25,7 @@ p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("li
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
 p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=0.0, help="headless run length (s); 0 = until DONE. Window mode never times out")
-p.add_argument("--spinmatch_warp", type=float, default=4.0, help="time warp during SPIN-MATCH (docker spin-up on the 1 N*m couple takes >= ~27 s real)")
+p.add_argument("--spinmatch_warp", type=float, default=8.0, help="time warp while COASTING through SPIN-MATCH (docker spin-up on the 1 N*m couple takes >= ~27 s)")
 p.add_argument("--fixed_dt", type=float, default=0.0, help="sim seconds per frame (0 = real time from the wall clock)")
 p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--no_prologue", action="store_true", help="jump straight to the docker-selection freeze")
 p.add_argument("--prologue_warp", type=float, default=400.0, help="mission-time warp while the imagers transfer into the NMC")
@@ -121,10 +121,53 @@ class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by th
 ref = RefRenderer()
 Kn = R_.K_for(RES, 62.0)     # docker near-field camera (range < 11 m): wide FOV, close near plane, illuminator on
 ARMRES = 200; Ka = R_.K_for(ARMRES, 88.0)
+# Chase cam + thruster plumes (Daniel 2026-11-11, "make the thrusters fire"). Thruster LAYOUT is an ASSUMPTION for the visual only:
+# the physics uses 1 N thrusters at a 0.5 m lever (TRR / v2). Couple nozzles sit at +-0.5 m on the docker's body axes and fire
+# tangentially; translation nozzles fire opposite the commanded delta-v. Plume length scales with the commanded thrust.
+CHRES = 300; Kch = R_.K_for(CHRES, 60.0); CHASE_OFF = np.array([4.5, -6.5, 2.5])
+LEV = 0.5
+def _nozzles(FIRE):
+    out = []   # (position in docker body, exhaust direction in docker body, throttle 0..1)
+    t = FIRE["tau"] if FIRE["det"] is None else FIRE["det"] * 0.5
+    caps = (DOCK_TAU, DOCK_TAU, DOCK_TAU)
+    for ax in range(3):
+        if ax != 1 and not FIRE["big"] and FIRE["det"] is None: continue   # x/z on the wheels unless a big swing
+        u = float(np.clip(t[ax] / caps[ax], -1, 1))
+        if abs(u) < 0.05: continue
+        e = np.eye(3); a1, a2 = e[(ax + 1) % 3], e[(ax + 2) % 3]
+        # couple about axis ax: thrust F = +-a2 at r = +-LEV*a1 gives r x F = +-LEV a1 x a2 = +-LEV e_ax; exhaust opposite the thrust
+        for sgn in (1, -1):
+            r = sgn * LEV * a1; F = sgn * np.sign(u) * a2
+            out.append((r, -F, abs(u)))
+    dv = FIRE["dv"]; dn = np.linalg.norm(dv)
+    if dn > 1e-7:
+        out.append((-0.6 * dv / dn, -dv / dn, 1.0)); out.append((-0.6 * dv / dn + 0.15 * np.cross(dv / dn, [0, 0, 1.0 if abs(dv[2]) < 0.9 * dn else 0]), -dv / dn, 0.8))
+    return out
+def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame):
+    over = np.zeros_like(img, np.float32)
+    def proj(pw):
+        x = Rc.T @ (pw - pc)
+        if x[2] < 0.05: return None
+        u = Kch @ x; return (float(u[0] / u[2]), float(u[1] / u[2]))
+    rng_ = np.random.default_rng(frame)
+    for r, ex, thr in _nozzles(FIRE):   # short flaring exhaust cone per firing nozzle (canvas is RGB)
+        p0 = pd + Rd @ r; L = (0.35 + 0.65 * thr) * (0.8 + 0.4 * rng_.random())
+        a = proj(p0); b = proj(p0 + Rd @ ex * L)
+        if a is None or b is None: continue
+        a = np.array(a); b = np.array(b); dvec = b - a; ln = np.linalg.norm(dvec)
+        if ln < 1.0: cv2.circle(over, tuple(int(v) for v in a), 5, tuple(255.0 * thr for _ in range(3)), -1, cv2.LINE_AA); continue
+        nrm = np.array([-dvec[1], dvec[0]]) / ln
+        for frac, wmul, col in ((1.0, 0.45, (255, 110, 30)), (0.75, 0.28, (255, 180, 90)), (0.45, 0.12, (255, 245, 225))):   # outer glow -> hot core
+            e = a + dvec * frac; w0 = 1.5; w1 = max(2.5, wmul * ln)
+            poly = np.array([a + nrm * w0, e + nrm * w1, e - nrm * w1, a - nrm * w0], np.int32)
+            cv2.fillPoly(over, [poly], tuple(c * (0.35 + 0.65 * thr) for c in col), cv2.LINE_AA)
+        cv2.circle(over, tuple(int(v) for v in a), 3, (255, 255, 255), -1, cv2.LINE_AA)
+    over = cv2.GaussianBlur(over, (0, 0), 3.0) * 1.3 + cv2.GaussianBlur(over, (0, 0), 0.8) * 0.5
+    return np.clip(img.astype(np.float32) + over, 0, 255).astype(np.uint8)
 def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3):
     for k, n in n_sc.items(): world.set_visible(n, k != own)   # a camera never sees its own bus
     world.set_visible(n_arm, own != "docker")
-    Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else RES
+    Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else (CHRES if Kc is Kch else RES)
     return world.render(Kc, n_, n_, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head)
 def auto_expose(g, target=200.0):   # display auto-exposure: 97th percentile of lit pixels -> target
     m = g > 6
@@ -469,8 +512,15 @@ while True:
         live.append(col); Rcs.append(Rc); pcs.append(pc)
     grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
     fixes = [None] * 3; nin = [0] * 3; t_model = 0.0
+    # COAST (Daniel 2026-11-11): wx = wz = 0 -> TOPEX spins steadily about one fixed axis, fully predictable once converged. Through
+    # SPIN-MATCH the cameras are paused and the MEKF propagates on its rate estimate (any warp); when spin-match is reached it drops to
+    # 1x and RE-LOCKS on vision (>= 10 accepted fixes) before FINAL APPROACH.
+    COAST = A.ph == "SPIN-MATCH" and not getattr(A, "relock", False) and filt.q is not None
+    FIRE = dict(tau=np.zeros(3), big=False, dv=np.zeros(3), det=None)   # what the docker's thrusters did this frame (for the plumes)
     if W.attached:
         pass   # gripped: TOPEX state comes from the docker's IMU through the rigid grip
+    elif COAST:
+        pass   # coasting: no vision this frame
     elif filt.q is None or A.ph == "ACQUIRE":
         if A.ph != "ACQUIRE": A.set("ACQUIRE", W.t)
         t0 = time.perf_counter(); ok = acquire(); t_model = time.perf_counter() - t0
@@ -494,14 +544,14 @@ while True:
         if lost_count >= 4 and A.ph not in ("FINAL APPROACH", "GRIP"):   # estimate no longer explains any camera -> re-acquire (autonomy pauses where it was)
             A.resume = A.ph if A.ph not in ("ACQUIRE", "CONVERGE") else None; A.set("ACQUIRE", W.t); filt.q = None; lost_count = 0
     # ---- time step
-    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if A.ph == "SPIN-MATCH" and lost_count == 0 else 1.0)); dts = dt * warp
-    if A.ph == "SPIN-MATCH": dts = min(dts, max(dt, 0.15)); warp = dts / dt   # cap the per-frame motion the tracker must follow (Mac run lost lock at x4)
+    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if COAST else 1.0)); dts = dt * warp
     if A.ph == "DETUMBLE":
         # TIME WARP applies to the detumble torque only: the stack's attitude advances by the real frame time at its true
         # instantaneous rate (smooth, no aliasing), while one 1 N thruster x 0.5 m (v2 / TRR) fired against H removes
         # 0.5 N*m*s of |H| per (warped) second, burning hydrazine at 0.5 N*m / (0.5 m * Isp * g0).
         W.R_IB, W.w = mekf.torque_free_step(W.R_IB, W.w, J_TRUE, dt, n=max(4, int(dt * 120)))
         HI = W.R_IB @ (J_TRUE @ W.w); hn = np.linalg.norm(HI); dH = min(hn, DETUMBLE_TAU * dts)
+        if hn > 1e-9 and dH > 0: FIRE["det"] = -(W.R_sc["docker"].T @ HI) / hn   # torque direction (docker body) fighting H
         HI = HI * (hn - dH) / hn if hn > 1e-12 else HI * 0; STATS["fuel_detumble_kg"] += dH * KG_PER_NMS
         W.w = np.linalg.solve(J_TRUE, W.R_IB.T @ HI)
     else:
@@ -535,6 +585,11 @@ while True:
     elif A.ph == "HOLD 30 m" and W.t - A.t_ph > 2.0: A.set("SPIN-MATCH", W.t); A.delta_goal = None
     # docker guidance from the ESTIMATE. Hold on TOPEX's (inertially fixed) H axis and let the gripper absorb the wobble (team ConOps S2):
     # spin-up / twist on the hydrazine thruster couple (1 N*m), wobble (swing) tracking on the RW8 wheels (0.25 N*m), translation 2 N.
+    # TOPEX COM for guidance: mean of the vision-updated estimate (fixed point: COM unforced), from 5 s into CONVERGE on, skipping
+    # COAST frames (no new fixes there: averaging the propagated value would crowd out the real data); window capped at 300 frames
+    if est_ok and not COAST and A.ph in ("CONVERGE", "HOLD 30 m", "SPIN-MATCH", "FINAL APPROACH", "GRIP") and not (A.ph == "CONVERGE" and W.t - A.t_ph < 5.0):
+        A.npf = getattr(A, "npf", 0) + 1
+        A.pf = p_est.copy() if getattr(A, "pf", None) is None else A.pf + (p_est - A.pf) / min(A.npf, 300)
     if est_ok and A.ph in ("SPIN-MATCH", "FINAL APPROACH", "GRIP"):
         wI_est = R_est @ w_est; hI = R_est @ (J @ w_est); u_grip = R_est @ (DOCK_PB / np.linalg.norm(DOCK_PB))
         a_m = hI / np.linalg.norm(hI) * np.sign(hI @ u_grip) if np.linalg.norm(hI) > 1.0 else u_grip
@@ -544,7 +599,7 @@ while True:
         # TOPEX's COM is unforced (and CW drift over ~2 min at 30 m is negligible): the guidance uses a 30 s running average of the
         # estimate. The per-fix PnP position noise is 6-9 cm with ~1 cm mean bias per camera (pos_fix_bias_m), so a 3 s filter left
         # 5-9 cm of wander at the grip; the long average takes it to ~1-2 cm.
-        A.pf = p_est.copy() if getattr(A, "pf", None) is None else A.pf + (p_est - A.pf) * min(1.0, dts / 30.0)
+        if getattr(A, "pf", None) is None: A.pf = p_est.copy()
         p_est_g = A.pf
         R_des = R_est @ DOCK_RB
         # propagate the docker attitude over this step with the rates commanded last step (same instant as the truth/estimate)
@@ -574,6 +629,7 @@ while True:
         cap = np.array([DOCK_TAU if big else RW_TAU, DOCK_TAU, DOCK_TAU if big else RW_TAU]); tau = np.clip(tau_req, -cap, cap)
         wB = wB + np.linalg.solve(J_DOCK, tau - gyro) * dts; W.wI_dock = Rd0 @ wB
         STATS["fuel_spin_kg"] += abs(tau[1]) * dts * KG_PER_NMS
+        FIRE["tau"] = tau.copy(); FIRE["big"] = big
         if big: STATS["fuel_swing_kg"] += (abs(tau[0]) + abs(tau[2])) * dts * KG_PER_NMS
         else:   # wheels: momentum exchange only (no propellant)
             A.hw = getattr(A, "hw", np.zeros(3)) - np.array([tau[0], 0.0, tau[2]]) * dts
@@ -598,7 +654,7 @@ while True:
             pe = p_des - com; pn = np.linalg.norm(pe)
             v_cmd = vff + (pe / pn * min(0.15 * max(pn - 0.01, 0.0), math.sqrt(2 * 0.8 * DOCK_A_MAX * max(pn - 0.01, 0.0))) if pn > 1e-9 else 0)
             dv = v_cmd - W.v_dock; dn = np.linalg.norm(dv); dv_ = dv * min(1.0, DOCK_A_MAX * h_ / dn) if dn > 1e-12 else np.zeros(3)
-            W.v_dock = W.v_dock + dv_; STATS["fuel_trans_kg"] += np.linalg.norm(dv_) * M_DOCK / (ISP * G0)
+            W.v_dock = W.v_dock + dv_; FIRE["dv"] = FIRE["dv"] + Rd0.T @ dv_; STATS["fuel_trans_kg"] += np.linalg.norm(dv_) * M_DOCK / (ISP * G0)
             vn = np.linalg.norm(W.v_dock)
             if vn > DOCK_V_MAX: W.v_dock *= DOCK_V_MAX / vn
         W.sc["docker"] = com - Rd0 @ C_DOCK
@@ -611,7 +667,10 @@ while True:
             w_rel_est = np.degrees(np.linalg.norm(mekf.relative_rate_body(w_est, R_est, W.w_dock, W.R_sc["docker"])))
             att_e = np.degrees(np.linalg.norm(Rot.from_matrix(R_des @ Rd0.T).as_rotvec()))   # before this step's rotation
             if _os.environ.get("DEMO_DEBUG") and int(W.t * 10) % 20 == 0: print(f"[sm t={W.t:.1f} e_tw={math.degrees(e_tw):.1f} swing={math.degrees(sn):.2f} wrel={w_rel_est:.2f} att={att_e:.2f} pn={pn:.2f} wd={math.degrees(np.linalg.norm(W.wI_dock)):.1f}]")
-            if w_rel_est < 0.5 and att_e < 1.0 and pn < 0.05: A.set("FINAL APPROACH", W.t); A.v_app = 0.0; A.t_fa_mission = W.t_mission; A.d_fa0 = A.d
+            if w_rel_est < 0.5 and att_e < 1.0 and pn < 0.05:
+                if not getattr(A, "relock", False): A.relock = True; A.relock_t0 = W.t; print(f"[t={W.t:7.2f}] spin matched on the coasted estimate -> 1x, re-locking on vision", flush=True)
+                elif sum(1 for tf in fix_times if tf > A.relock_t0) >= 10:
+                    A.set("FINAL APPROACH", W.t); A.v_app = 0.0; A.t_fa_mission = W.t_mission; A.d_fa0 = A.d
         if A.ph == "GRIP" and not getattr(A, "closed", False):
             # claw closes (2611 -> 1211 mm span over ~3 s) until a finger tip is 2 cm from the TOPEX surface
             ARM_S = max(ARM_CLOSED, ARM_S - dt * (1 - ARM_CLOSED) / 3.0)
@@ -699,6 +758,12 @@ while True:
         acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.35, znear=0.05)
         ARM_IMG = auto_expose(cv2.cvtColor(acol, cv2.COLOR_RGB2GRAY), 160)
     else: ARM_IMG = None
+    CHASE_IMG = None
+    if A.ph in ("SPIN-MATCH", "FINAL APPROACH", "GRIP", "DETUMBLE") and A.arrived:
+        Rd_, pd_ = W.R_sc["docker"], W.sc["docker"]
+        pc_ = pd_ + Rd_ @ CHASE_OFF; Rc_ = look_at(pc_, pd_ + Rd_ @ np.array([0.0, 2.5, 0.0]), up=Rd_[:, 2])
+        ccol, _ = render_view(Rc_, pc_, own=None, Kc=Kch, head=0.6, znear=0.05)
+        CHASE_IMG = draw_plumes(ccol, Rc_, pc_, Rd_, pd_, FIRE, frame)
     warp_disp = APPROACH_WARP if A.ph == "FINAL APPROACH" else warp
     if not A.arrived:
         warp_tag(canvas, 22, 32, f"T+{hms(TM_D)}   TIME x{3000 if 7700 < TM_D < 14100 else 300}", "SC1 (docker): transfer to the 200 m hold, glideslope to 30 m (prox.csv)")
@@ -708,6 +773,7 @@ while True:
         if A.ph == "DETUMBLE":
             l1 = "detumble torque warped; spin drawn at its true rate"
             l2 = f"hydrazine {STATS['fuel_detumble_kg']:.2f} / ~{grip_report['detumble_hydrazine_est_kg']:.2f} kg   {(W.t - A.t_detumble) / 3600:.2f} / {grip_report['detumble_est_s'] / 3600:.1f} h"
+        elif COAST: l1, l2 = "docker spin-up on the 1 N*m thruster couple", "spin drawn at its warped rate"
         elif A.ph == "FINAL APPROACH": l1, l2 = f"approach translation warped ({A.v_app:.3f} m/s real);", "spin drawn at its true rate"
         else: l1, l2 = "translation warped", "(0.1 m/s back-off)"
         txt(canvas, l1, 250, 664, 0.42, (200, 200, 255)); txt(canvas, l2, 250, 686, 0.45, (150, 255, 190) if A.ph == "DETUMBLE" else (200, 200, 255), 1)
@@ -752,6 +818,10 @@ while True:
                -50, 50, "TOPEX body rates deg/s (dark truth, light est)" if PW > 400 else "TOPEX rates deg/s")
     plot(canvas, 772, 620, PW, 96, ["wrt", "wre", "att"], [(255, 255, 255), (100, 200, 255), (100, 100, 255)], 0, 10,
          "docker rel. rate true (white) / est (blue), att err deg (red), 0-10" if PW > 400 else "rel rate true/est, att err, 0-10")
+    if CHASE_IMG is not None:
+        xc0, yc0 = 12, 300; canvas[yc0:yc0 + CHRES, xc0:xc0 + CHRES] = CHASE_IMG
+        cv2.rectangle(canvas, (xc0, yc0), (xc0 + CHRES - 1, yc0 + CHRES - 1), (60, 140, 240), 1)
+        txt(canvas, "CHASE CAM  (thrusters)", xc0 + 6, yc0 + 16, 0.42, (60, 170, 255))
     if ARM_IMG is not None:
         x0a, y0a = 1078, 518
         canvas[y0a:y0a + ARMRES, x0a:x0a + ARMRES] = cv2.cvtColor(ARM_IMG, cv2.COLOR_GRAY2BGR)[:WIN_H - y0a]

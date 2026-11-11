@@ -150,14 +150,14 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame):
         if x[2] < 0.05: return None
         u = Kch @ x; return (float(u[0] / u[2]), float(u[1] / u[2]))
     rng_ = np.random.default_rng(frame)
-    for r, ex, thr in _nozzles(FIRE):   # short flaring exhaust cone per firing nozzle (canvas is RGB)
+    for r, ex, thr in _nozzles(FIRE):   # short flaring exhaust cone per firing nozzle (BGR, like the canvas)
         p0 = pd + Rd @ r; L = (0.35 + 0.65 * thr) * (0.8 + 0.4 * rng_.random())
         a = proj(p0); b = proj(p0 + Rd @ ex * L)
         if a is None or b is None: continue
         a = np.array(a); b = np.array(b); dvec = b - a; ln = np.linalg.norm(dvec)
         if ln < 1.0: cv2.circle(over, tuple(int(v) for v in a), 5, tuple(255.0 * thr for _ in range(3)), -1, cv2.LINE_AA); continue
         nrm = np.array([-dvec[1], dvec[0]]) / ln
-        for frac, wmul, col in ((1.0, 0.45, (255, 110, 30)), (0.75, 0.28, (255, 180, 90)), (0.45, 0.12, (255, 245, 225))):   # outer glow -> hot core
+        for frac, wmul, col in ((1.0, 0.45, (30, 110, 255)), (0.75, 0.28, (90, 180, 255)), (0.45, 0.12, (225, 245, 255))):   # orange glow -> white-hot core (BGR)
             e = a + dvec * frac; w0 = 1.5; w1 = max(2.5, wmul * ln)
             poly = np.array([a + nrm * w0, e + nrm * w1, e - nrm * w1, a - nrm * w0], np.int32)
             cv2.fillPoly(over, [poly], tuple(c * (0.35 + 0.65 * thr) for c in col), cv2.LINE_AA)
@@ -763,7 +763,7 @@ while True:
         Rd_, pd_ = W.R_sc["docker"], W.sc["docker"]
         pc_ = pd_ + Rd_ @ CHASE_OFF; Rc_ = look_at(pc_, pd_ + Rd_ @ np.array([0.0, 2.5, 0.0]), up=Rd_[:, 2])
         ccol, _ = render_view(Rc_, pc_, own=None, Kc=Kch, head=0.6, znear=0.05)
-        CHASE_IMG = draw_plumes(ccol, Rc_, pc_, Rd_, pd_, FIRE, frame)
+        CHASE_IMG = draw_plumes(cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR), Rc_, pc_, Rd_, pd_, FIRE, frame)
     warp_disp = APPROACH_WARP if A.ph == "FINAL APPROACH" else warp
     if not A.arrived:
         warp_tag(canvas, 22, 32, f"T+{hms(TM_D)}   TIME x{3000 if 7700 < TM_D < 14100 else 300}", "SC1 (docker): transfer to the 200 m hold, glideslope to 30 m (prox.csv)")

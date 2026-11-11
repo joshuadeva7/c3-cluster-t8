@@ -24,7 +24,8 @@ p = argparse.ArgumentParser()
 p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-all32")   # Mac: fp32 CoreML (ALL/NE fp16 build is wrong on the ANE)
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
-p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=120.0)
+p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=0.0, help="headless run length (s); 0 = until DONE. Window mode never times out")
+p.add_argument("--spinmatch_warp", type=float, default=4.0, help="time warp during SPIN-MATCH (docker spin-up on the 1 N*m couple takes >= ~27 s real)")
 p.add_argument("--fixed_dt", type=float, default=0.0, help="sim seconds per frame (0 = real time from the wall clock)")
 p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--no_prologue", action="store_true", help="jump straight to the docker-selection freeze")
 p.add_argument("--prologue_warp", type=float, default=400.0, help="mission-time warp while the imagers transfer into the NMC")
@@ -298,7 +299,7 @@ def apply_cmd(cmd):
             if nm in UI_SLIDERS: UI_SLIDERS[nm].val = float(x)
     elif cmd == "go": A.go = True
     elif cmd == "loss":   # corrupt the estimate by 60 deg: the pipeline must notice and re-acquire
-        if filt.q is not None: filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
+        if filt.q is not None and A.ph not in ("FINAL APPROACH", "GRIP", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DONE"): filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
     elif cmd == "ir":     # imagerA's visible camera (MSSS LCAM) fails: ~2.5 s dark, then its MSSS ECAM-IR3A LWIR camera takes over
         if IR["cam"] is None: IR.update(cam="imagerA", t_fail=W.t, last=-1e9, img=None); STATS["ir_t"].append(round(W.t, 2))
     elif cmd == "light": W.sun = Rot.from_euler("z", 75, degrees=True).as_matrix() @ W.sun; STATS["light_t"].append(round(W.t, 2))
@@ -493,7 +494,7 @@ while True:
         if lost_count >= 4 and A.ph not in ("FINAL APPROACH", "GRIP"):   # estimate no longer explains any camera -> re-acquire (autonomy pauses where it was)
             A.resume = A.ph if A.ph not in ("ACQUIRE", "CONVERGE") else None; A.set("ACQUIRE", W.t); filt.q = None; lost_count = 0
     # ---- time step
-    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else 1.0); dts = dt * warp
+    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if A.ph == "SPIN-MATCH" else 1.0)); dts = dt * warp
     if A.ph == "DETUMBLE":
         # TIME WARP applies to the detumble torque only: the stack's attitude advances by the real frame time at its true
         # instantaneous rate (smooth, no aliasing), while one 1 N thruster x 0.5 m (v2 / TRR) fired against H removes
@@ -764,7 +765,7 @@ while True:
         if kk == "x": apply_cmd("loss")
         elif kk == "i": apply_cmd("ir")
         elif kk == "l": apply_cmd("light")
-    if t_demo >= a.T or (A.ph == "DONE" and W.t > A.t_ph + 3) or (a.until_grip and grip_report and A.ph == "DETUMBLE" and W.t > A.t_ph + 1500): break
+    if (a.headless and a.T > 0 and t_demo >= a.T) or (a.headless and A.ph == "DONE" and W.t > A.t_ph + 3) or (a.until_grip and grip_report and A.ph == "DETUMBLE" and W.t > A.t_ph + 1500): break
 if writer is not None: writer.release()
 summary = dict(selftest=SELFTEST, feat=a.feat, crop=a.crop, script=a.script, fixed_dt=a.fixed_dt, sun_unknown=a.sun_unknown, w0=W.w.tolist() if not grip_report else None, phases=A.log, grip=grip_report,
                median_cycle_ms=float(np.median(STATS["cycle_ms"])) if STATS["cycle_ms"] else None, median_model_ms=float(np.median(STATS["model_ms"])) if STATS["model_ms"] else None,

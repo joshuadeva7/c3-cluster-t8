@@ -14,4 +14,4 @@ Box environment: `source /workspace/live-demo-env/bin/activate`. MegaPose: `/wor
 ## Live demo
 - Mac window mode (one pyglet window; drag the wx/wy/wz sliders, then GO; buttons/keys: G go, X inject loss, L sun change, SPACE skip cutscene, Q quit): `bash mac/setup_mac.sh` once (re-run it: it now installs moderngl and pyglet 2 and drops pyrender), then `bash mac/run_demo.sh`. Add `--no_cutscene` to skip the cutscene.
 - Mac headless self-test (no window): `bash mac/test_demo_headless.sh` writes `mac/results/demo_test.mp4`.
-- Headless capture (box): `python demo.py --headless --fixed_dt 0.1 --T 160 --record demo_capture.mp4 --script "0:w=0.02,0.66,0.02;1:go"`
+- Headless capture (box): `python demo.py --headless --fixed_dt 0.1 --T 160 --record demo_capture.mp4 --script "0:w=0.02,0.661,0.02;1:go"`

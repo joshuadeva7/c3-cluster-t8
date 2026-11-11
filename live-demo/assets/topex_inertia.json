@@ -1,42 +1,43 @@
 {
+ "assumption": "DEMO ASSUMPTION (Daniel, 2026-11-11): roll (mesh y, the long bus axis) is TOPEX's MAJOR principal axis, so the spin about roll is stable. Moments are the Dennehy 1988 values (via Benoit 2023) re-assigned: roll (mesh y) 11,665, yaw (mesh x, altimeter +x / HGA -x) 9,371, pitch (mesh z, solar array) 4,213 kg m^2, products of inertia 0. The centre of mass is placed on the mesh y axis (x = z = 0, CAD y kept) so the spin axis is the axis the v2 videos spin about and the v2 grip point (0, -3.877, 0) lies on it. Real TOPEX spins about yaw; the CAD-derived tensor (J_cad, com_cad_m) is kept below for reference.",
  "mass_kg": 2500.0,
- "voxel_pitch_m": 0.08,
- "model_used": "two_comp (bus 2100 / array 300 / appendages 100 kg)",
- "com_body_m": [
-  -0.10538823125456392,
-  -0.20839607383120484,
-  0.6556269041542603
- ],
  "J_used": [
   [
-   15174.543812797045,
-   359.5762171574421,
-   524.9311536244973
+   9371.0,
+   0.0,
+   0.0
   ],
   [
-   359.5762171574421,
-   11173.887706160029,
-   393.9209759281808
+   0.0,
+   11665.0,
+   0.0
   ],
   [
-   524.9311536244973,
-   393.9209759281808,
-   7058.986373337601
+   0.0,
+   0.0,
+   4213.0
   ]
  ],
- "J_used_principal": [
-  6992.29497881725,
-  11170.366118532495,
-  15244.756794944935
+ "J_used_principal_xyz": [
+  9371.0,
+  11665.0,
+  4213.0
  ],
- "principal_axis_y_alignment": [
-  0.08851340311580308,
-  0.9915982381212408,
-  0.09433086251970034
+ "com_body_m": [
+  0.0,
+  -0.20839607383120484,
+  0.0
  ],
- "Iyy_used": 11173.887706160029,
+ "spin_axis_body": [
+  0.0,
+  1.0,
+  0.0
+ ],
+ "spin_rate_default_rad_s": 0.6613879270715354,
+ "H_default_Nms": 7715.09016928946,
+ "voxel_pitch_m": 0.08,
+ "model_used": "two_comp (bus 2100 / array 300 / appendages 100 kg)",
  "team_Iz_spin": 11665.0,
- "Iyy_vs_team": 0.9578986460488665,
  "uniform_com": [
   -0.12753038726090632,
   -0.17326863280881952,
@@ -60,5 +61,38 @@
   ]
  ],
  "uniform_Iyy_vs_team": 0.8583435405743145,
- "note": "In both models the +y spin axis is the INTERMEDIATE principal axis -> torque-free spin about y is unstable."
+ "J_cad": [
+  [
+   15174.543812797045,
+   359.5762171574421,
+   524.9311536244973
+  ],
+  [
+   359.5762171574421,
+   11173.887706160029,
+   393.9209759281808
+  ],
+  [
+   524.9311536244973,
+   393.9209759281808,
+   7058.986373337601
+  ]
+ ],
+ "J_cad_principal": [
+  6992.29497881725,
+  11170.366118532495,
+  15244.756794944935
+ ],
+ "com_cad_m": [
+  -0.10538823125456392,
+  -0.20839607383120484,
+  0.6556269041542603
+ ],
+ "cad_principal_axis_y_alignment": [
+  0.08851340311580308,
+  0.9915982381212408,
+  0.09433086251970034
+ ],
+ "Iyy_cad": 11173.887706160029,
+ "Iyy_cad_vs_team": 0.9578986460488665
 }

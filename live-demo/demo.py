@@ -1,11 +1,12 @@
 """SWARM x TOPEX live demo.
   cutscene (v2 video up to prox-ops) -> live scene: TOPEX tumbles at the slider rates (true torque-free rigid body,
-  CAD-derived inertia); imager A, imager B and the docker each render a camera view of the real CAD; the real XFeat model
+  inertia from assets/topex_inertia.json: DEMO ASSUMPTION roll = major axis, spin about body y); imager A, imager B and the docker each render a camera view of the real CAD; the real XFeat model
   + PnP tracks TOPEX in each view; a MEKF fuses all fixes into a continuous TOPEX state; the docker's autonomy uses ONLY that
   estimate: hold 30 m -> spin-match -> final approach -> grip clear of the dish -> detumble -> stable -> back off.
-Controls (window mode): 3 sliders = TOPEX body rates (rad/s, team design max 1 rad/s), G = go, X = inject tracking loss,
+Controls (window mode): 3 sliders = TOPEX body rates (rad/s; roll wy default 0.661 = 9.5 s period, +-1 team design max;
+  wx/wz +-0.10 = small transverse rates that make the stable roll spin cone a few degrees), G = go, X = inject tracking loss,
   L = rotate the sun, R = reset, SPACE = skip cutscene, Q/ESC = quit.
-Headless: --headless --record out.mp4 --script "0:w=0.05,0.66,0.03;3:go;45:light;60:loss" (sim advances fixed dt per frame)."""
+Headless: --headless --record out.mp4 --script "0:w=0.02,0.661,0.02;3:go;45:light;60:loss" (sim advances fixed dt per frame)."""
 import os as _os; _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import sys, time, json, math, argparse, collections
 import numpy as np, cv2
@@ -15,12 +16,13 @@ from scipy.spatial.transform import Rotation as Rot
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 p = argparse.ArgumentParser()
-p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-onnx-coreml")
+p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-all32")   # Mac: fp32 CoreML (ALL/NE fp16 build is wrong on the ANE)
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
 p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=120.0)
 p.add_argument("--fixed_dt", type=float, default=0.0, help="sim seconds per frame (0 = real time from the wall clock)")
-p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--wmax", type=float, default=1.0)
+p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--wmax", type=float, default=1.0, help="roll (wy) slider range +-wmax")
+p.add_argument("--wtmax", type=float, default=0.10, help="transverse (wx, wz) slider range +-wtmax")
 p.add_argument("--approach_speed", type=float, default=1.0, help="m/s final approach in the demo (mission: 0.03 m/s)")
 p.add_argument("--detumble_warp", type=float, default=600.0); p.add_argument("--fps_out", type=int, default=10)
 p.add_argument("--metrics", default=""); p.add_argument("--seed", type=int, default=0)
@@ -31,9 +33,10 @@ rng = np.random.default_rng(a.seed)
 # ------------------------------------------------------------------ assets
 cad = np.load(_os.path.join(HERE, "assets", "cad_render.npz"))
 INR = json.load(open(_os.path.join(HERE, "assets", "topex_inertia.json")))
-COM = np.array(INR["com_body_m"]); J = np.array(INR["J_used"])        # CAD tensor scaled to team Iz (see derive_inertia.py)
+COM = np.array(INR["com_body_m"]); J = np.array(INR["J_used"])        # ASSUMED: diag(yaw 9371, roll 11665, pitch 4213), COM on mesh y (derive_inertia.py)
+W0_DEFAULT = float(INR["spin_rate_default_rad_s"])                     # 2 pi / 9.5 s about roll (body +y)
 tm = R_.topex_mesh(); tm.vertices -= COM                               # body origin = centre of mass
-DOCK_PB = np.array([0.0, -3.877, 0.0]) - COM                           # v2 docked position (prox.csv) in TOPEX body
+DOCK_PB = np.array([0.0, -3.877, 0.0]) - COM                           # v2 docked position (prox.csv DOCK_R 3.877 m on -y, mesh frame) in TOPEX body: on the spin axis
 DOCK_RB = R_.Rot.from_euler("y", -90, degrees=True).as_matrix()        # v2 DOCK_CLOCK: claw rolled clear of the dish
 HOLD_D = 30.0; TOPEX_MASS = INR["mass_kg"]
 def swarm_mesh(accent, keys=("shell", "inner", "arr_dep", "arm_ext", "arm_end")):
@@ -66,7 +69,8 @@ J_TRUE = J.copy()                                   # truth inertia: TOPEX alone
 # ------------------------------------------------------------------ rendering (one GL context: the window's, or standalone when headless)
 def T44(Rm, t): T = np.eye(4); T[:3, :3] = Rm; T[:3, 3] = t; return T
 WIN_W, WIN_H = 1280, 800
-DISP = ui_window.Display(WIN_W, WIN_H, a.headless, wmax=a.wmax)
+WMAX3 = np.array([a.wtmax, a.wmax, a.wtmax])
+DISP = ui_window.Display(WIN_W, WIN_H, a.headless, wmax=tuple(WMAX3), w0=(0.0, W0_DEFAULT, 0.0))
 RES = a.camres; K = R_.K_for(RES, 30.0)
 MAINRES = 512; Km = R_.K_for(MAINRES, 45.0)
 world = gl_render.GLScene(DISP.ctx)
@@ -134,7 +138,9 @@ def selftest(trk, n=5):
     good = sum(1 for r in res if r[0] >= 15 and r[1] < 3.0)            # healthy on >= 3 of 5 poses (no one-pose fluke)
     return good >= 3 and px > 100, inl, err, ms, px
 FEAT = None; TRK = None; SELFTEST = []
-for cand in [a.feat] + [b for b in ("xfeat-onnx-coreml", "xfeat-coreml-cpu", "xfeat-torch-mps", "xfeat-onnx-cpu", "orb") if b != a.feat]:
+FALLBACK = ("xfeat-onnx-cpu", "orb") if sys.platform.startswith("linux") else \
+           ("xfeat-coreml-all32", "xfeat-coreml-gpu", "xfeat-onnx-coreml", "xfeat-onnx-cpu", "orb")   # never coreml-all / coreml-ne (fp16 ANE build is wrong)
+for cand in [a.feat] + [b for b in FALLBACK if b != a.feat]:
     try:   # fall back through backends if one can't load OR fails the known-pose self-test on this machine (logged)
         f_ = features.make(cand, **(kw if cand.startswith("xfeat-") else {})); f_.extract([np.zeros((a.crop, a.crop), np.uint8)] * 2)
         trk_ = T_.Tracker(ref, f_, crop_res=a.crop, iters=1); ok_, inl_, err_, ms_, px_ = selftest(trk_)
@@ -205,7 +211,7 @@ EV = parse_script(a.script)
 sliders = {"wx": 0.0, "wy": 0.0, "wz": 0.0}
 def apply_cmd(cmd):
     if cmd.startswith("w="):
-        v = [float(x) for x in cmd[2:].split(",")]; v = np.clip(v, -a.wmax, a.wmax)
+        v = [float(x) for x in cmd[2:].split(",")]; v = np.clip(v, -WMAX3, WMAX3)
         if A.ph in ("WAIT FOR GO",): W.w = np.array(v, float)
         sliders.update(wx=v[0], wy=v[1], wz=v[2])
     elif cmd == "go": A.go = True

@@ -30,10 +30,11 @@ QUAD_FS = "#version 330\nuniform sampler2D tex; in vec2 uv; out vec4 f; void mai
 
 class Display:
     """show(canvas_bgr) -> list of events: ('key', ch) / ('slider', name, value) / ('button', key) / ('quit',)."""
-    def __init__(self, W, H, headless, title="SWARM live demo", wmax=1.0, w0=(0.0, 0.66, 0.0)):
+    def __init__(self, W, H, headless, title="SWARM live demo", wmax=1.0, w0=(0.0, 0.661, 0.0)):
         self.W, self.H, self.headless = W, H, headless; self.events = []; self.drag = None; self.closed = False
         ys = H - 70
-        self.sliders = [Slider(n, 20, ys + 22 * i, 300, -wmax, wmax, v) for i, (n, v) in enumerate(zip(("wx", "wy", "wz"), w0))]
+        wm = wmax if isinstance(wmax, (tuple, list)) else (wmax,) * 3   # per-axis slider range
+        self.sliders = [Slider(n, 20, ys + 22 * i, 300, -m, m, v) for i, (n, v, m) in enumerate(zip(("wx", "wy", "wz"), w0, wm))]
         self.buttons = [Button("GO", "g", 470, ys - 10), Button("LOSS", "x", 550, ys - 10), Button("SUN", "l", 630, ys - 10),
                         Button("SKIP", " ", 470, ys + 22), Button("QUIT", "q", 550, ys + 22)]
         if headless:

@@ -12,7 +12,7 @@ F = cv2.FONT_HERSHEY_SIMPLEX
 
 class Slider:
     def __init__(self, name, x, y, w, lo, hi, val): self.name, self.x, self.y, self.w, self.lo, self.hi, self.val = name, x, y, w, lo, hi, val
-    def hit(self, mx, my): return self.x - 8 <= mx <= self.x + self.w + 8 and abs(my - self.y) <= 12
+    def hit(self, mx, my): return self.x - 14 <= mx <= self.x + self.w + 14 and abs(my - self.y) <= 22
     def set_from_x(self, mx): u = np.clip((mx - self.x) / self.w, 0, 1); self.val = round(float(self.lo + u * (self.hi - self.lo)), 3)
     def draw(self, img, enabled=True):
         col = (235, 235, 235) if enabled else (110, 110, 110)
@@ -64,6 +64,8 @@ class Display:
             import pyglet.window.key as k
             m = {k.G: "g", k.X: "x", k.L: "l", k.I: "i", k.Q: "q", k.ESCAPE: "q", k.SPACE: " ", k.R: "r", k.ENTER: "\r", k.RETURN: "\r", k.S: "\r", k.P: "p"}
             if sym in m: self.events.append(("key", m[sym]))
+            if self.mode == "select" and sym in (k.LEFT, k.RIGHT, k.UP, k.DOWN) and self.sliders:   # arrows nudge wy by 0.01 rad/s
+                s_ = self.sliders[0]; s_.val = round(float(np.clip(s_.val + (0.01 if sym in (k.RIGHT, k.UP) else -0.01), s_.lo, s_.hi)), 3)
             return True                                        # don't let pyglet close on ESC by itself
         @w.event
         def on_mouse_press(x, y, b, mod):
@@ -72,12 +74,13 @@ class Display:
             for s in self.sliders:
                 if s.hit(cx, cy): self.drag = s; s.set_from_x(cx); self.events.append(("slider", s.name, s.val)); return
             if self.go.hit(cx, cy) and self.go_enabled: self.events.append(("key", "g"))
+        def follow(x, y):   # a held slider follows the pointer whichever event macOS delivers (drag or plain motion)
+            if self.drag is not None: cx, _ = to_canvas(x, y); self.drag.set_from_x(cx); self.events.append(("slider", self.drag.name, self.drag.val))
         @w.event
         def on_mouse_motion(x, y, dx, dy):
-            cx, cy = to_canvas(x, y); self.hover = self.mode == "select" and self.go.hit(cx, cy)
+            cx, cy = to_canvas(x, y); self.hover = self.mode == "select" and self.go.hit(cx, cy); follow(x, y)
         @w.event
-        def on_mouse_drag(x, y, dx, dy, b, mod):
-            if self.drag is not None: cx, _ = to_canvas(x, y); self.drag.set_from_x(cx); self.events.append(("slider", self.drag.name, self.drag.val))
+        def on_mouse_drag(x, y, dx, dy, b, mod): follow(x, y)
         @w.event
         def on_mouse_release(x, y, b, mod): self.drag = None
         @w.event

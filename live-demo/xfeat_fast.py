@@ -10,6 +10,12 @@ _orig_unfold = XFeatModel._unfold2d
 XFeatModel._unfold2d = lambda self, x, ws=2: F.pixel_unshuffle(x, ws)   # identical result, exportable to CoreML
 WEIGHTS = os.path.join(SRC, "accelerated_features", "weights", "xfeat.pt")
 
+# NOTE (Mac diag 2026-11-11): the CoreML ALL/NE build gives wrong keypoints (0.52 agreement with onnx-cpu) while the
+# GPU/CPU builds agree (0.996/0.994). torch fp16 on CPU agrees 0.996 with no overflow, so it is not fp16 math as such;
+# the likely culprit is the ANE evaluating the integer index arithmetic (idx % W, idx // W, idx up to 65535) in fp16,
+# which cannot represent integers above 2048 exactly. Use coreml-gpu (5.4 ms) instead of ALL/NE.
+GRAPH_VER = "v1"
+
 class XFeatGraph(nn.Module):
     def __init__(self, top_k=512, thr=0.05, B=6, H=256, W=256):
         super().__init__(); self.net = XFeatModel(); self.net.load_state_dict(torch.load(WEIGHTS, map_location="cpu")); self.k = top_k; self.thr = thr
@@ -39,7 +45,8 @@ def mnn(da, db, sa=None, sb=None, min_cos=0.82):
     ok = (i2[j] == i) & (S[i, j] > min_cos); return va[i[ok]], vb[j[ok]]
 
 class Runner:
-    """backend in: torch-cpu, torch-mps, torch-cpu-bf16, onnx-cpu, onnx-cpu-int8, onnx-coreml, coreml-all, coreml-ne, coreml-gpu, coreml-cpu"""
+    """backend in: torch-cpu, torch-mps, torch-cpu-bf16, onnx-cpu, onnx-cpu-int8, onnx-coreml, coreml-all, coreml-ne, coreml-gpu, coreml-cpu,
+    coreml-all32 (fp32 compute: no ANE, GPU/CPU)"""
     def __init__(self, backend, res=256, top_k=512, batch=6, cache="/tmp/xfeat_exports"):
         self.b, self.res, self.k, self.B = backend, res, top_k, batch; os.makedirs(cache, exist_ok=True)
         g = XFeatGraph(top_k, B=batch, H=res, W=res).eval(); ex = torch.zeros(batch, 1, res, res)
@@ -63,13 +70,15 @@ class Runner:
             self.s = ort.InferenceSession(path, so, providers=prov); self.used = self.s.get_providers(); self.run = self._onnx
         elif backend.startswith("coreml"):
             import coremltools as ct
-            path = os.path.join(cache, f"xfeat_{res}_{top_k}_b{batch}.mlpackage")
+            fp32 = backend.endswith("32")
+            path = os.path.join(cache, f"xfeat_{res}_{top_k}_b{batch}{'_fp32' if fp32 else ''}.mlpackage")
             if not os.path.exists(path):
                 tr = torch.jit.trace(g, ex)
                 m = ct.convert(tr, inputs=[ct.TensorType(name="x", shape=ex.shape)], convert_to="mlprogram",
-                               compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13)
+                               compute_precision=ct.precision.FLOAT32 if fp32 else ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13)
                 m.save(path)
-            cu = {"coreml-all": ct.ComputeUnit.ALL, "coreml-ne": ct.ComputeUnit.CPU_AND_NE, "coreml-gpu": ct.ComputeUnit.CPU_AND_GPU, "coreml-cpu": ct.ComputeUnit.CPU_ONLY}[backend]
+            cu = {"coreml-all": ct.ComputeUnit.ALL, "coreml-ne": ct.ComputeUnit.CPU_AND_NE, "coreml-gpu": ct.ComputeUnit.CPU_AND_GPU, "coreml-cpu": ct.ComputeUnit.CPU_ONLY,
+                  "coreml-all32": ct.ComputeUnit.ALL}[backend]
             self.m = ct.models.MLModel(path, compute_units=cu); self.outnames = [o.name for o in self.m.get_spec().description.output]; self.run = self._coreml
         else: raise ValueError(backend)
 

@@ -3,5 +3,5 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; LD="$(dirname "$HERE")"
 CONDA="${CONDA:-/opt/miniconda3/bin/conda}"; source "$("$CONDA" info --base)/etc/profile.d/conda.sh"; conda activate swarm-live
-export LIVE_DEMO_SRC="$HERE/_src" PYTORCH_ENABLE_MPS_FALLBACK=1
+source "$HERE/ensure_src.sh" || exit 1; export PYTORCH_ENABLE_MPS_FALLBACK=1
 cd "$LD" && python demo.py --metrics "$HERE/demo_metrics.jsonl" "$@"

@@ -44,7 +44,7 @@ rc_, _ = T_.crop(cv2.cvtColor(ref.render(*pose_set[0][:2])[0], cv2.COLOR_RGB2GRA
 cv2.imwrite(f"{OUT}/crop_ref0.png", rc_)
 probe = [rc_] * 6
 base = None; D["backends"] = []
-for name in ("xfeat-onnx-cpu", "xfeat-coreml-all", "xfeat-coreml-ne", "xfeat-coreml-cpu", "xfeat-coreml-gpu", "xfeat-onnx-coreml", "xfeat-torch-mps", "orb"):
+for name in ("xfeat-onnx-cpu", "xfeat-coreml-all", "xfeat-coreml-ne", "xfeat-coreml-cpu", "xfeat-coreml-gpu", "xfeat-coreml-all32", "xfeat-onnx-coreml", "xfeat-torch-mps", "orb"):
     r = dict(backend=name)
     try:
         t0 = time.perf_counter(); f = features.make(name, res=CROP, top_k=512) if name.startswith("xfeat-") else features.make(name); r["load_s"] = round(time.perf_counter() - t0, 2)

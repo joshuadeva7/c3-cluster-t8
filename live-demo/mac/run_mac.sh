@@ -5,7 +5,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; LD="$(dirname "$HERE")"
 CONDA="${CONDA:-/opt/miniconda3/bin/conda}"; source "$("$CONDA" info --base)/etc/profile.d/conda.sh"; conda activate swarm-live
-export LIVE_DEMO_SRC="$HERE/_src" PYTORCH_ENABLE_MPS_FALLBACK=1   # any op MPS lacks falls back to CPU (counted in the timing)
+source "$HERE/ensure_src.sh" || exit 1; export PYTORCH_ENABLE_MPS_FALLBACK=1   # any op MPS lacks falls back to CPU (counted in the timing)
 OUT="$HERE/results/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$OUT"; cd "$LD"
 { sysctl -n machdep.cpu.brand_string; sysctl -n hw.memsize; sw_vers; python -c "import torch,onnxruntime as o,coremltools as c;print(torch.__version__,o.__version__,o.get_available_providers(),c.__version__)"; } > "$OUT/system.txt" 2>&1
 BACKENDS="orb xfeat-orig xfeat-torch-cpu xfeat-torch-mps xfeat-torch-mps-fp16 xfeat-onnx-cpu xfeat-onnx-coreml xfeat-coreml-all xfeat-coreml-ne xfeat-coreml-gpu xfeat-coreml-cpu splg-cpu splg-mps"

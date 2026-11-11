@@ -15,7 +15,7 @@ from scipy.spatial.transform import Rotation as Rot
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 p = argparse.ArgumentParser()
-p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-all")
+p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-gpu")
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
 p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=120.0)
@@ -118,7 +118,7 @@ def set_scene_poses():
 set_scene_poses()
 filt = mekf.TargetMEKF(J=J, sig_rot_meas=np.radians(1.2), sig_pos_meas=0.2, gate_deg=20.0)
 kw = {"top_k": 512, "res": a.crop} if a.feat.startswith("xfeat-") else {}
-def selftest(trk, n=3):
+def selftest(trk, n=5):
     """known pose -> render -> track from a 4 deg / 0.5 m perturbed prior. Returns (ok, inliers, rot err deg, model ms/call)."""
     rs = np.random.default_rng(123); res = []
     for i in range(n):
@@ -131,9 +131,10 @@ def selftest(trk, n=3):
     for _ in range(5): trk.f.extract([np.zeros((a.crop, a.crop), np.uint8)] * 6)
     ms = (time.perf_counter() - t0) / 5 * 1000
     inl = int(np.median([r[0] for r in res])); err = float(np.median([r[1] for r in res])); px = int(np.median([r[2] for r in res]))
-    return inl >= 12 and err < 5.0 and px > 100, inl, err, ms, px
+    good = sum(1 for r in res if r[0] >= 15 and r[1] < 3.0)            # healthy on >= 3 of 5 poses (no one-pose fluke)
+    return good >= 3 and px > 100, inl, err, ms, px
 FEAT = None; TRK = None; SELFTEST = []
-for cand in [a.feat] + [b for b in ("xfeat-coreml-all", "xfeat-onnx-coreml", "xfeat-torch-mps", "xfeat-onnx-cpu", "orb") if b != a.feat]:
+for cand in [a.feat] + [b for b in ("xfeat-coreml-gpu", "xfeat-onnx-coreml", "xfeat-coreml-cpu", "xfeat-coreml-all32", "xfeat-torch-mps", "xfeat-onnx-cpu", "orb") if b != a.feat]:
     try:   # fall back through backends if one can't load OR fails the known-pose self-test on this machine (logged)
         f_ = features.make(cand, **(kw if cand.startswith("xfeat-") else {})); f_.extract([np.zeros((a.crop, a.crop), np.uint8)] * 2)
         trk_ = T_.Tracker(ref, f_, crop_res=a.crop, iters=1); ok_, inl_, err_, ms_, px_ = selftest(trk_)

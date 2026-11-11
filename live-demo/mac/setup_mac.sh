@@ -10,11 +10,7 @@ conda env list | grep -q "^swarm-live " || conda create -y -n swarm-live -c cond
 conda activate swarm-live
 python -m pip install -q --upgrade pip
 python -m pip install -q "torch==2.7.1" "torchvision==0.22.1" onnx onnxruntime coremltools opencv-python-headless numpy scipy trimesh kornia moderngl "pyglet>=2.0,<2.2"
-mkdir -p "$SRC"
-[ -d "$SRC/accelerated_features" ] || git clone -q https://github.com/verlab/accelerated_features.git "$SRC/accelerated_features"
-git -C "$SRC/accelerated_features" checkout -q e92685f57f8318b18725c5c8c0bd28c7fe188d9a
-[ -d "$SRC/LightGlue" ] || git clone -q https://github.com/cvg/LightGlue.git "$SRC/LightGlue"
-git -C "$SRC/LightGlue" checkout -q 5a650c444718caffc2669dc0094cde908f42dd73
+source "$HERE/ensure_src.sh"
 python -m pip install -q -e "$SRC/LightGlue"
 python -m pip uninstall -y -q pyrender opencv-python 2>/dev/null || true   # demo renders with moderngl (CGL) + one pyglet window; no OpenCV GUI, no pyrender
 python -m pip install -q --force-reinstall --no-deps opencv-python-headless

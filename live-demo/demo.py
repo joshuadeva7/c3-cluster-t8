@@ -494,7 +494,8 @@ while True:
         if lost_count >= 4 and A.ph not in ("FINAL APPROACH", "GRIP"):   # estimate no longer explains any camera -> re-acquire (autonomy pauses where it was)
             A.resume = A.ph if A.ph not in ("ACQUIRE", "CONVERGE") else None; A.set("ACQUIRE", W.t); filt.q = None; lost_count = 0
     # ---- time step
-    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if A.ph == "SPIN-MATCH" else 1.0)); dts = dt * warp
+    warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if A.ph == "SPIN-MATCH" and lost_count == 0 else 1.0)); dts = dt * warp
+    if A.ph == "SPIN-MATCH": dts = min(dts, max(dt, 0.15)); warp = dts / dt   # cap the per-frame motion the tracker must follow (Mac run lost lock at x4)
     if A.ph == "DETUMBLE":
         # TIME WARP applies to the detumble torque only: the stack's attitude advances by the real frame time at its true
         # instantaneous rate (smooth, no aliasing), while one 1 N thruster x 0.5 m (v2 / TRR) fired against H removes

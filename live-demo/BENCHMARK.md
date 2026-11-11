@@ -149,3 +149,29 @@ Without the Euler model, a 6.8 deg/s tumble leaves 0.73 deg/s of rate error. The
 cd live-demo && bash mac/setup_mac.sh && bash mac/run_mac.sh
 ```
 It writes `mac/results/<timestamp>/summary.md` + `results.jsonl` + `loop.jsonl`. Backends: ORB, XFeat (torch CPU / MPS / MPS-fp16, ONNX CPU / CoreML EP, CoreML ALL / NE / GPU / CPU), SuperPoint+LightGlue (CPU / MPS), a lighting-mismatch set, MEKF timing, and the end-to-end loop if pyrender can open an offscreen GL context on macOS.
+
+## Live demo app (`demo.py`), box headless runs, 2026-11-11
+
+Inputs: three TOPEX body-rate sliders (±1.0 rad/s per axis) and a GO trigger. Truth is torque-free rigid-body motion with the CAD inertia. Two imagers and the docker render live camera views. Fused XFeat (ONNX CPU, 192 px crop) render-and-match feeds PnP fixes from all cameras into one MEKF. The docker is guided only by the MEKF estimate. Grip contact is scored against truth. Every run below used `--fixed_dt 0.1` (sim time), 3 cameras and a 512 px camera render. The recording is `demo_capture.mp4` (cutscene, then the live run).
+
+| run (script) | phase times (s, sim) | att err med (deg) | rate err med (deg/s) | grip pos err (m) | grip att err (deg) | true rel rate at grip (deg/s) | pads→dish (m) | pads→TOPEX (m) |
+|---|---|---|---|---|---|---|---|---|
+| nominal w=(0.02,0.66,0.02) | ACQ 1.1, HOLD 5.6, SPIN 7.7, FINAL 16.8, GRIP 43.1, STABLE 14863, DONE 14883 | 0.354 | 0.135 | 0.196 | 0.564 | 0.400 | 3.89 | 0.020 |
+| 1.0 rad/s about y | GRIP 43.2 | 0.249 | 0.135 | 0.348 | 0.444 | 0.840 | 3.65 | 0.333 |
+| 1.0 rad/s, (0.577,0.577,0.577) | GRIP 53.5 | 0.369 | 0.205 | 0.460 | 0.691 | 1.168 | 3.96 | 0.208 |
+| loss at 12 s, light +75° at 30 s | loss 12.1, re-acq done 14.7 (2.6 s), GRIP 45.5 | 0.356 | 0.204 | 0.145 | 0.226 | 0.178 | 3.85 | 0.079 |
+| `--sun_unknown`, light +75° at 30 s | GRIP 44.5 | 1.167 | 0.567 | 0.151 | 0.296 | 2.106 | 3.79 | 0.057 |
+
+- Detumble after grip: one 1 N thruster on a 0.5 m arm (0.5 N·m) fired against the angular momentum, time-warped x300. It took 43.2 → 14,863 s sim = 4.12 h to reach the MR-4 band of 0.00175 rad/s. The team figure is 4.27 h, based on Iz = 11,665 kg·m².
+- Nominal run timing, box CPU, single process: median cycle 95 ms, of which 33–48 ms is model time. Fixes run at 10 Hz sim (one per `fixed_dt`).
+- Docker kinematics are honest and unconstrained. Max commanded docker speed was 18.3 m/s (nominal), 24.1 m/s (1 rad/s about y) and 30.8 m/s (1 rad/s diagonal). The 30 m hold point sweeps at ω·30 m. Peak commanded rates were 49 deg/s (nominal) and 311–442 deg/s at 1 rad/s; those peaks are the feedback transient when spin-match starts. For the demo the docker is assumed to be able to fly this. A real docker would hold closer in, or match spin first.
+- Dish clearance is measured against the real HGA dish mesh component (1,008 triangles on the −x boom). The pads grip the aft bus face along −y, 3.6–4.0 m from the dish in every run.
+
+### Inertia used
+`derive_inertia.py` voxelizes the TOPEX CAD at 0.08 m, at a mass of 2,500 kg (STM-AUDIT PP2).
+- Two-component model (assumed split: bus 2,100 kg, array 300 kg, appendages 100 kg): principal moments 6,992 / 11,170 / 15,245 kg·m², Iyy = 11,174 kg·m², which is 0.958 of the team value Iz = 11,665 kg·m². **This model is used** (`assets/topex_inertia.json`).
+- Uniform-density model: 0.858 of the team value.
+- Finding: in the CAD model the y axis (the team's spin axis) is the **intermediate** principal axis. Pure spin about y is therefore unstable, so the 0.66 rad/s tumble wanders across axes. This is visible in the rate plots.
+
+### Slider max
+±1.0 rad/s per axis. This matches the team's ~1 rad/s design rate ("inter-frame rotation unambiguous up to ~1 rad/s"); the nominal tumble is 0.661 rad/s. Both 1.0 rad/s cases above tracked and gripped.

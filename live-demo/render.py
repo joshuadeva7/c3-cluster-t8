@@ -8,7 +8,9 @@ Lighting: one directional "sun", tiny ambient, black background.
 import os
 import sys as _sys
 if _sys.platform.startswith("linux"): os.environ.setdefault("PYOPENGL_PLATFORM", "egl")   # macOS: pyglet offscreen
-import numpy as np, trimesh, pyrender
+import numpy as np, trimesh
+BACKEND = os.environ.get("LIVE_DEMO_RENDER", "pyrender" if _sys.platform.startswith("linux") else "gl")   # macOS: moderngl/CGL (pyrender needs a pyglet screen)
+if BACKEND == "pyrender": import pyrender
 from scipy.spatial.transform import Rotation as Rot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +29,9 @@ def K_for(res, hfov_deg=30.0):
 CV2GL = np.diag([1, -1, -1, 1.0])
 
 class SpaceRenderer:
+    def __new__(cls, *args, **kw):
+        if BACKEND == "gl" and cls is SpaceRenderer: return object.__new__(GLSpaceRenderer)
+        return object.__new__(cls)
     def __init__(self, res=512, hfov_deg=30.0, mesh=None, sun_dir_cam=(-0.5, -0.3, 0.8), share=None, smooth=False):
         self.res = res; self.K = K_for(res, hfov_deg)
         self.mesh = mesh if mesh is not None else topex_mesh()
@@ -47,6 +52,18 @@ class SpaceRenderer:
         self.scene.set_pose(self.node, CV2GL @ T)   # camera at origin looking -z (GL) == +z (CV)
         col, dep = self.r.render(self.scene)
         return col, dep
+
+class GLSpaceRenderer(SpaceRenderer):
+    """same interface on the moderngl renderer (standalone EGL/CGL context, shared via share=)."""
+    def __init__(self, res=512, hfov_deg=30.0, mesh=None, sun_dir_cam=(-0.5, -0.3, 0.8), share=None, smooth=False):
+        import gl_render
+        self.res = res; self.K = K_for(res, hfov_deg); self.mesh = mesh if mesh is not None else topex_mesh()
+        self.sc = gl_render.GLScene(share.sc.ctx if share is not None else None); self.sc.add(self.mesh)
+        d = np.asarray(sun_dir_cam, float); self.sun_cam = -d / np.linalg.norm(d)   # toward the sun, camera frame
+        self.r = self
+    def render(self, R, t, depth=True, sun_cam=None):
+        s = self.sun_cam if sun_cam is None else np.asarray(sun_cam, float)
+        return self.sc.render(self.K, self.res, self.res, R.T, -R.T @ t, R.T @ s, znear=0.5, zfar=500)
 
 def random_pose(rng, rmin=25.0, rmax=45.0, hfov_deg=30.0, margin=0.6):
     R = Rot.random(random_state=rng).as_matrix()

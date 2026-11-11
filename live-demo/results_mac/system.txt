@@ -1,0 +1,7 @@
+Apple M1 Pro
+34359738368
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+Torch version 2.7.1 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+2.7.1 1.31.1 ['CoreMLExecutionProvider', 'AzureExecutionProvider', 'CPUExecutionProvider'] 9.0

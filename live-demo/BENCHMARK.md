@@ -175,3 +175,29 @@ Inputs: three TOPEX body-rate sliders (±1.0 rad/s per axis) and a GO trigger. T
 
 ### Slider max
 ±1.0 rad/s per axis. This matches the team's ~1 rad/s design rate ("inter-frame rotation unambiguous up to ~1 rad/s"); the nominal tumble is 0.661 rad/s. Both 1.0 rad/s cases above tracked and gripped.
+
+## Apple M1 Pro results (Daniel's Mac, 2026-11-11, `mac/run_mac.sh`)
+macOS 27.2, torch 2.7.1, coremltools 9.0, ORT 1.31.1 with the CoreML EP. Same 30-frame set as the box: 3 cameras, 512 px renders. Raw output is in `results_mac/` (summary.md, results.jsonl, mekf.txt, system.txt).
+
+| backend | crop | prior | model ms (3 cams) | cycle ms | Hz | success | rot err med/p90 (deg) |
+|---|---|---|---|---|---|---|---|
+| **xfeat-coreml-all** (demo default on Mac) | 256 | 5° | 7.7 | 20.8 | 48.0 | 1.00 | 2.26/4.17 |
+| xfeat-coreml-all | 256 | 15° | 7.8 | 20.9 | 47.9 | 1.00 | 3.76/10.66 |
+| xfeat-coreml-all, lighting mismatch | 256 | 5° | 7.2 | 19.5 | 51.2 | 1.00 | 2.03/4.34 |
+| xfeat-coreml-ne | 256 | 5° | 7.7 | 20.3 | 49.2 | 1.00 | 2.26/4.17 |
+| xfeat-coreml-gpu | 256 | 5° | 6.5 | 13.9 | 72.1 | **0.70** | 2.46/7.90 |
+| xfeat-coreml-cpu | 256 | 5° | 13.5 | 21.0 | 47.5 | 1.00 | 1.67/4.76 |
+| xfeat-onnx-coreml | 256 | 5° | 15.0 | 23.9 | 41.9 | 1.00 | 2.20/5.59 |
+| xfeat-torch-mps | 256 | 5° | 21.1 | 29.4 | 34.0 | 1.00 | 2.20/5.59 |
+| xfeat-onnx-cpu | 256 | 5° | 27.6 | 36.4 | 27.5 | 1.00 | 2.20/5.59 |
+| xfeat-orig (upstream) | 256 | 5° | 43.6 | 52.3 | 19.1 | 1.00 | 2.06/3.94 |
+| orb | 256 | 5° | 8.0 | 13.6 | 73.4 | 1.00 | 0.73/1.90 |
+| splg-cpu | 256 | 5° | 886.6 | 1030.0 | 1.0 | 1.00 | 0.72/2.11 |
+| splg-mps | 256 | 5° | 208.1 | 1217.4 | 0.8 | 1.00 | 0.72/2.11 |
+
+- The fused XFeat graph on CoreML (all compute units) runs 3 cameras in 7.7 ms of model time, 5.7× faster than upstream XFeat on the same Mac (43.6 ms), with the same 100% success rate.
+- The GPU-only CoreML build is faster (6.5 ms) but succeeds on only 70% of frames, against 100% for the other CoreML units on identical inputs. Treat it as numerically off (probably reduced-precision drift in the softmax/NMS head) and don't use it.
+- At 192 px CoreML loses accuracy (3.97° median against 2.26° at 256 px) and saves only 1.7 ms, so the Mac demo defaults to 256 px. The box default stays at 192 px.
+- SuperPoint+LightGlue on MPS (0.8 Hz; 0.2 Hz with lighting mismatch) is slower than on CPU and unusable live.
+- MEKF on the Mac: predict 65 µs, update 44 µs.
+- The Mac closed-loop runs (`run_loop.py`) failed: pyrender's macOS path opens a pyglet window, and pyglet found no screen (`IndexError` in `get_default_screen`, see `stderr.log`). Fix: on macOS the renderer now defaults to moderngl with a standalone CGL context (`gl_render.py`, `LIVE_DEMO_RENDER=gl`). The demo UI is a single pyglet window that owns the only GL context, so the OpenCV GUI is no longer used.

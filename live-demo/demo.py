@@ -10,15 +10,15 @@ import os as _os; _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import sys, time, json, math, argparse, collections
 import numpy as np, cv2
 import render as R_, tracker as T_, features, mekf
-import pyrender, trimesh
+import trimesh, gl_render, ui_window
 from scipy.spatial.transform import Rotation as Rot
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 p = argparse.ArgumentParser()
 p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("linux") else "xfeat-coreml-all")
-p.add_argument("--crop", type=int, default=192); p.add_argument("--camres", type=int, default=512)
+p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
-p.add_argument("--script", default="0:w=0.03,0.66,0.02;4:go"); p.add_argument("--T", type=float, default=120.0)
+p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=120.0)
 p.add_argument("--fixed_dt", type=float, default=0.0, help="sim seconds per frame (0 = real time from the wall clock)")
 p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--wmax", type=float, default=1.0)
 p.add_argument("--approach_speed", type=float, default=1.0, help="m/s final approach in the demo (mission: 0.03 m/s)")
@@ -54,40 +54,26 @@ _dish = max(_m0.submesh([np.nonzero(_out)[0]], append=True).split(only_watertigh
 DISH_PTS = np.asarray(_dish.vertices) - COM
 TOPEX_PTS = np.asarray(tm.vertices)
 
-# ------------------------------------------------------------------ rendering (one GL context, several scenes)
-CV2GL3 = np.diag([1.0, -1.0, -1.0])
+# ------------------------------------------------------------------ rendering (one GL context: the window's, or standalone when headless)
 def T44(Rm, t): T = np.eye(4); T[:3, :3] = Rm; T[:3, 3] = t; return T
-def light_pose(s):   # directional light shining along -s (s = unit vector toward the sun)
-    z = s / np.linalg.norm(s); x = np.cross([0.3, 1, 0.1], z); x /= np.linalg.norm(x); return T44(np.c_[x, np.cross(z, x), z], np.zeros(3))
+WIN_W, WIN_H = 1280, 800
+DISP = ui_window.Display(WIN_W, WIN_H, a.headless, wmax=a.wmax)
 RES = a.camres; K = R_.K_for(RES, 30.0)
-gl = pyrender.OffscreenRenderer(RES, RES)
-world = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.035] * 3)
-n_top = world.add(pyrender.Mesh.from_trimesh(tm, smooth=False))
-n_sc = {k: world.add(pyrender.Mesh.from_trimesh(m, smooth=False)) for k, m in SW.items()}
-n_sun = world.add(pyrender.DirectionalLight(color=np.ones(3), intensity=6.0))
-camK = pyrender.IntrinsicsCamera(K[0, 0], K[1, 1], K[0, 2], K[1, 2], znear=0.3, zfar=2000)
-n_cam = world.add(camK)
 MAINRES = 512; Km = R_.K_for(MAINRES, 45.0)
-camM = pyrender.IntrinsicsCamera(Km[0, 0], Km[1, 1], Km[0, 2], Km[1, 2], znear=0.3, zfar=4000)
-n_camM = world.add(camM)
+world = gl_render.GLScene(DISP.ctx)
+n_top = world.add(tm)
+n_sc = {k: world.add(m) for k, m in SW.items()}
 class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by the camera's known sun vector
     def __init__(self):
-        self.K = K; self.res = RES
-        self.scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.035] * 3)
-        self.node = self.scene.add(pyrender.Mesh.from_trimesh(tm, smooth=False))
-        self.scene.add(pyrender.IntrinsicsCamera(K[0, 0], K[1, 1], K[0, 2], K[1, 2], znear=0.3, zfar=2000), pose=np.eye(4))
-        self.sun = self.scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=6.0))
-    def render(self, Rm, t, sun_cam=None):
-        self.scene.set_pose(self.node, R_.CV2GL @ T44(Rm, t))
+        self.K = K; self.res = RES; self.scene = gl_render.GLScene(DISP.ctx); self.scene.add(tm)
+    def render(self, Rm, t, sun_cam=None):   # (Rm, t) = TOPEX body -> camera
         s = sun_cam if sun_cam is not None else np.array([-0.5, -0.3, -0.8])
-        self.scene.set_pose(self.sun, light_pose(CV2GL3 @ s))
-        return gl.render(self.scene)
+        return self.scene.render(K, RES, RES, Rm.T, -Rm.T @ t, Rm.T @ s, znear=0.3, zfar=2000)
 ref = RefRenderer()
 def render_view(R_IC, p_IC, main=False, own=None):
-    world.main_camera_node = n_camM if main else n_cam
-    for k, n in n_sc.items(): n.mesh.is_visible = (k != own)   # a camera never sees its own bus
-    world.set_pose(n_camM if main else n_cam, T44(R_IC @ CV2GL3, p_IC))
-    col, dep = gl.render(world); return col, dep
+    for k, n in n_sc.items(): world.set_visible(n, k != own)   # a camera never sees its own bus
+    if main: return world.render(Km, MAINRES, MAINRES, R_IC, p_IC, W.sun, znear=0.3, zfar=4000)
+    return world.render(K, RES, RES, R_IC, p_IC, W.sun, znear=0.3, zfar=2000)
 
 # ------------------------------------------------------------------ truth state
 def look_at(pos, target, up=np.array([0, 0, 1.0])):
@@ -140,7 +126,6 @@ def acquire(cam="imagerA", group="I"):
     filt.update(Rc @ best[1][0], Rc @ best[1][1] + pc); return True
 
 # ------------------------------------------------------------------ dashboard
-WIN_W, WIN_H = 1280, 800
 F = cv2.FONT_HERSHEY_SIMPLEX
 def txt(img, s, x, y, sc=0.45, col=(230, 230, 230), th=1): cv2.putText(img, s, (int(x), int(y)), F, sc, col, th, cv2.LINE_AA)
 HIST = collections.deque(maxlen=600); FULL = []
@@ -182,10 +167,7 @@ def apply_cmd(cmd):
         if filt.q is not None: filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
     elif cmd == "light": W.sun = Rot.from_euler("z", 75, degrees=True).as_matrix() @ W.sun; STATS["light_t"].append(round(W.t, 2))
 STATS = {"dock_v": [], "dock_w": [], "loss_t": [], "light_t": [], "reacq_t": [], "fix_hz": [], "cycle_ms": [], "model_ms": []}
-if not a.headless:
-    cv2.namedWindow("SWARM live demo", cv2.WINDOW_AUTOSIZE)
-    for nm in ("wx", "wy", "wz"): cv2.createTrackbar(f"{nm} x0.01 rad/s", "SWARM live demo", int(100 * a.wmax), int(200 * a.wmax), lambda v: None)
-    cv2.setTrackbarPos("wy x0.01 rad/s", "SWARM live demo", int(100 * a.wmax) + 66)
+UI_SLIDERS = {sl.name: sl for sl in DISP.sliders}
 writer = None
 if a.record:
     writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), a.fps_out, (WIN_W, WIN_H))
@@ -201,8 +183,9 @@ def play_cutscene():
         if writer is not None and n % max(1, round(fps / a.fps_out)) == 0: writer.write(canvas)
         n += 1
         if not a.headless:
-            cv2.imshow("SWARM live demo", canvas)
-            if cv2.waitKey(int(1000 / fps)) & 0xFF in (32, 27, ord("q")): break
+            DISP.draw_controls(canvas, True); t_show = time.perf_counter()
+            if any(e[0] == "key" and e[1] in (" ", "q") for e in DISP.show(canvas)): break
+            time.sleep(max(0.0, 1.0 / fps - (time.perf_counter() - t_show)))
     cap.release()
 if not a.no_cutscene: play_cutscene()
 
@@ -213,9 +196,8 @@ t_demo = 0.0
 while t_demo < a.T and A.ph != "DONE" or (A.ph == "DONE" and W.t < A.t_ph + 3):
     c0 = time.perf_counter()
     while ev_i < len(EV) and EV[ev_i][0] <= W.t: apply_cmd(EV[ev_i][1]); ev_i += 1
-    if not a.headless:
-        v = [(cv2.getTrackbarPos(f"{nm} x0.01 rad/s", "SWARM live demo") - 100 * a.wmax) / 100.0 for nm in ("wx", "wy", "wz")]
-        if A.ph == "WAIT FOR GO": W.w = np.array(v); sliders.update(wx=v[0], wy=v[1], wz=v[2])
+    if not a.headless and A.ph == "WAIT FOR GO":
+        v = [UI_SLIDERS[nm].val for nm in ("wx", "wy", "wz")]; W.w = np.array(v); sliders.update(wx=v[0], wy=v[1], wz=v[2])
     # ---- cameras (truth render) + estimation
     live, Rcs, pcs, use = [], [], [], []
     for k in CAMS:
@@ -329,7 +311,6 @@ while t_demo < a.T and A.ph != "DONE" or (A.ph == "DONE" and W.t < A.t_ph + 3):
     # ---- scene poses for rendering
     world.set_pose(n_top, T44(W.R_IB, np.zeros(3)))
     for k in CAMS: world.set_pose(n_sc[k], T44(W.R_sc[k], W.sc[k]))
-    world.set_pose(n_sun, light_pose(W.sun))
     # ---- metrics
     att_err = R_.rot_err_deg(R_est, W.R_IB) if est_ok else float("nan")
     rate_err = float(np.degrees(np.linalg.norm(w_est - W.w))) if est_ok else float("nan")
@@ -374,13 +355,17 @@ while t_demo < a.T and A.ph != "DONE" or (A.ph == "DONE" and W.t < A.t_ph + 3):
     plot(canvas, 772, 660, 504, 130, ["wrt", "wre", "att"], [(255, 255, 255), (100, 200, 255), (100, 100, 255)], 0, 10, "docker rel. rate true (white) / est (blue), att err deg (red), 0-10")
     txt(canvas, f"sliders (rad/s): wx {sliders['wx']:+.2f}  wy {sliders['wy']:+.2f}  wz {sliders['wz']:+.2f}   [G]o [X] loss [L] sun [Q]uit", 8, 798, 0.42, (170, 170, 170))
     if grip_report: txt(canvas, f"GRIP: pos err {grip_report['grip_pos_err_m']:.2f} m, rel rate {grip_report['rel_rate_true_deg_s']:.2f} deg/s, pads-to-dish {grip_report['min_pad_to_dish_m']:.2f} m", 8, 60, 0.5, (120, 255, 160))
+    DISP.draw_controls(canvas, A.ph == "WAIT FOR GO")
     if writer is not None: writer.write(canvas)
     if not a.headless:
-        cv2.imshow("SWARM live demo", canvas); key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q")): break
-        if key == ord("g"): A.go = True
-        if key == ord("x"): apply_cmd("loss")
-        if key == ord("l"): apply_cmd("light")
+        quit_ = False
+        for e in DISP.show(canvas):
+            if e[0] != "key": continue
+            if e[1] == "q": quit_ = True
+            elif e[1] == "g": A.go = True
+            elif e[1] == "x": apply_cmd("loss")
+            elif e[1] == "l": apply_cmd("light")
+        if quit_: break
     frame += 1
 if writer is not None: writer.release()
 summary = dict(feat=a.feat, crop=a.crop, script=a.script, fixed_dt=a.fixed_dt, sun_unknown=a.sun_unknown, phases=A.log, grip=grip_report,

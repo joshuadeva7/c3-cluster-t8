@@ -222,7 +222,7 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     LOOK.F = LOOK_F0 * width / WIN_W * zoom; LOOK.cy = WIN_H / 2 - lift   # lift: picture centre raised (keeps the bottom error line clear)
     C = lvlh_C(T_VIS); V2.STARS = V2.H5["STARS_ECI"] @ C.T
     img = LOOK.background(Rc, Pc, cx, width)
-    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, TM_I, TM_I), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far)
+    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far)
     sel = roles_s > 0.5
     for k, (n0, n1) in m_sc.items():
         mainsc.set_visible(n0, not sel); mainsc.set_visible(n1, sel); T_ = T44(W.R_sc[k], W.sc[k])
@@ -473,10 +473,22 @@ t_demo = 0.0; t_live = 0.0; t_go = 0.0; FLASH = []; V_CAM = 27.0
 STAGE = "PROLOGUE"
 if a.no_prologue: TM_I, TM_D = P_NMC, P_BID
 def clock_burns(k, t_old, t_new):
+    if k in (1, 2): t_new = min(t_new, NMC_T1)   # imagers stay in the NMC: prox.csv's later depart burns never happen here
     for tb, kb in zip(V2.BURN_T, V2.BURN_K):
         if kb == k and t_old < tb <= t_new: FLASH.append([k, 0.0])
+# Imagers past the hand-off: the NMC is natural (unforced) relative motion, so it simply keeps repeating. prox.csv's NMC closes on
+# itself every 6743 s (measured: worst position mismatch over one period 0.6 m imagerA / 1.2 m imagerB); past NMC_T1 the imager clock
+# wraps back one period, with a 600 s cross-fade so the residual mismatch never shows as a jump (Daniel 2026-11-12: no frozen imagers).
+NMC_P, NMC_T1, NMC_XF = 6743.0, 33400.0, 600.0
+def nmc_tw(t):   # the prox.csv time the imagers' (repeating) NMC is at: trails / flashes read prox.csv there, never its later departures
+    return t if t <= NMC_T1 else t - math.ceil((t - NMC_T1) / NMC_P) * NMC_P
+def nmc_pos(kk, t):
+    if t <= NMC_T1: return V2.rel(kk, t)
+    tw = t - math.ceil((t - NMC_T1) / NMC_P) * NMC_P            # NMC_T1 - P < tw <= NMC_T1
+    s = float(V2.smoother((tw - (NMC_T1 - NMC_XF)) / NMC_XF)) if tw > NMC_T1 - NMC_XF else 0.0
+    return (1 - s) * V2.rel(kk, tw) + s * V2.rel(kk, tw - NMC_P)
 def place_free_flyers():
-    for k, kk in (("imagerA", 1), ("imagerB", 2)): W.sc[k] = V2.rel(kk, TM_I)
+    for k, kk in (("imagerA", 1), ("imagerB", 2)): W.sc[k] = nmc_pos(kk, TM_I)
 def flashes(dt_):
     for f_ in FLASH: f_[1] += dt_ / 0.55 * (1.0 if a.fixed_dt <= 0 else 1.0)
     FLASH[:] = [f_ for f_ in FLASH if f_[1] < 1.0]; return [(k, u) for k, u in FLASH]
@@ -552,21 +564,30 @@ def dashed(img, pts, col):
         seg = pts[i:i + 3]
         if len(seg) >= 2: cv2.polylines(img, [seg], False, col, 1, cv2.LINE_AA)
 def draw_trace(tile, k):
-    gx0, gx1, gy0, gy1 = 4, TILE - 5, TILE - TRACE_H, TILE - 5
+    # graph strip: a small label column on the left (directly under the x y z keys) holds the plotted range's max (top) and min
+    # (bottom) in deg/s, no axis line; the traces fill the rest of the strip and share that range
+    gy0, gy1 = TILE - TRACE_H, TILE - 5
+    lw_ = int(math.ceil(UT.segs_width([("-000", False)], 9)))   # fixed column width, so the traces never shift sideways
+    lx1 = 4 + lw_; gx0, gx1 = lx1 + 4, TILE - 5
+    yh, yl = gy0 + 18, gy1 - 6                                 # value lines of the max and min (labels centred on them, top one just under the keys)
     ov = tile.copy(); cv2.rectangle(ov, (0, gy0 - 4), (TILE, TILE), (0, 0, 0), -1); cv2.addWeighted(ov, 0.72, tile, 0.28, 0, tile)
-    ym = (gy0 + gy1) // 2; cv2.line(tile, (gx0, ym), (gx1, ym), (55, 55, 55), 1)
+    for j, nm in enumerate(("x", "y", "z")): UT.draw(tile, nm, 6 + 11 * j, gy0 - 2, 10, TR_C[j])
+    UT.draw(tile, "deg/s", gx1, gy0 - 2, 10, (160, 160, 160), anchor="r")
     if len(TR[k]) < 2: return
     P_ = np.array(TR[k]); fin = P_[:, 1:][np.isfinite(P_[:, 1:])]
-    lim = max(5.0, 1.15 * float(np.abs(fin).max())) if fin.size else 5.0; lim = math.ceil(lim / 5.0) * 5.0
+    lo, hi = (float(fin.min()), float(fin.max())) if fin.size else (0.0, 0.0)
+    hi, lo = math.ceil((hi - 0.5) / 5.0) * 5.0, math.floor((lo + 0.5) / 5.0) * 5.0   # data range out to the next multiple of 5 (sub-0.5 deg/s noise past it ignored)
+    if hi - lo < 5.0: hi = lo + 5.0
+    yv = lambda v: yh + (hi - v) / (hi - lo) * (yl - yh)
+    if lo < 0.0 < hi: y0_ = int(round(yv(0.0))); cv2.line(tile, (gx0, y0_), (gx1, y0_), (55, 55, 55), 1)   # zero line
+    for v, yy in ((hi, yh - 7), (lo, yl - 7)):
+        UT.draw(tile, f"{v:.0f}".replace("-0", "0") if v == 0 else f"{v:.0f}", lx1, yy, 9, (150, 150, 150), anchor="r")
     xs = gx1 - (t_demo - P_[:, 0]) / 30.0 * (gx1 - gx0)
     for j in range(3):   # truth first (dim, dashed), estimate on top (bright)
-        yt = ym - P_[:, 4 + j] / lim * (gy1 - gy0) / 2
-        dashed(tile, np.c_[xs, yt].astype(np.int32), tuple(int(c * 0.45) for c in TR_C[j]))
+        dashed(tile, np.c_[xs, yv(P_[:, 4 + j])].astype(np.int32), tuple(int(c * 0.45) for c in TR_C[j]))
     for j in range(3):
-        ye = ym - P_[:, 1 + j] / lim * (gy1 - gy0) / 2; ok = np.isfinite(ye)
+        ye = yv(P_[:, 1 + j]); ok = np.isfinite(ye)
         if ok.sum() >= 2: cv2.polylines(tile, [np.c_[xs[ok], ye[ok]].astype(np.int32)], False, TR_C[j], 1, cv2.LINE_AA)
-    for j, nm in enumerate(("x", "y", "z")): UT.draw(tile, nm, gx0 + 2 + 11 * j, gy0 - 2, 10, TR_C[j])
-    UT.draw(tile, f"\u00b1{lim:.0f} deg/s", gx1, gy0 - 2, 10, (160, 160, 160), anchor="r")
 def tile_frame(tile, acc):
     cv2.rectangle(tile, (0, 0), (TILE - 1, TILE - 1), acc, 1)
 def cam_tile(i, k, gray, Rc, pc, Kc, est_ok, R_est, p_est):
@@ -675,7 +696,7 @@ PATCH = cv2.resize(_pp, (560, 560), interpolation=cv2.INTER_AREA) if _pp is not 
 if PATCH is None: print("[ending] assets/swarm_patch.png missing: the patch card is skipped (placeholder hook)", flush=True)
 def end_begin(col_img):
     global STAGE, te, END_P0, END_TAILS, END_COL, END_T0, END_AZ0, END_EL0, END_D0
-    STAGE = "END"; te = 0.0; END_P0 = {k: W.sc[k].copy() for k in CRAFT3}; END_TAILS = {k: [] for k in CRAFT3}; END_COL = col_img
+    STAGE = "END"; te = 0.0; globals()["END_BO"] = 0.0; END_P0 = {k: W.sc[k].copy() for k in CRAFT3}; END_TAILS = {k: [] for k in CRAFT3}; END_COL = col_img
     R0, P0, END_D0 = V2.cam(78.0); END_T0 = P0 + R0[:, 2] * END_D0; END_AZ0 = float(V2.LKI[2](78.0)); END_EL0 = V2.CUT_EL
     A.set("ENDING", W.t)
 def cam_from(T, az, el, d):   # v2look.cam's construction from a target, azimuth, elevation (deg) and distance
@@ -760,11 +781,16 @@ while True:
                 except Exception: pass
                 _os.execv(sys.executable, [sys.executable] + sys.argv)
             continue
-        if te >= E_HALL: T_CLOCK += dt * END_CLK
+        dclk = dt * (END_CLK if te >= E_HALL else 10.0)   # mission time keeps running: x10 (as in DEPART) until the Hall thrusters light
+        T_CLOCK += dclk; TM_I += dclk
+        if te < E_HALL: END_BO = globals().get("END_BO", 0.0) + A.bo_v * dclk   # docker keeps backing off until its Hall thruster takes over
         taus = {}
         for i_, k in enumerate(("imagerA", "imagerB", "docker")):   # imagers light first (v2: the imagers leave first)
             tau = max(0.0, te - E_HALL - 0.3 * i_); taus[k] = tau
-            W.sc[k] = END_P0[k] + 0.5 * A_VIS * tau * tau * DEP_DIR
+            # imagers: still on their NMC (natural motion) with the departure on top; docker: its back-off drift, then the departure
+            base = nmc_pos(i_ + 1, TM_I) if k != "docker" else END_P0[k] + W.R_sc["docker"] @ np.array([0, -1.0, 0]) * globals().get("END_BO", 0.0)
+            W.sc[k] = base + 0.5 * A_VIS * tau * tau * DEP_DIR
+            if k != "docker" and tau <= 0: W.R_sc[k] = face_R(W.sc[k], np.zeros(3))   # still watching TOPEX until it leaves
             if tau > 0: END_TAILS[k].append(W.sc[k].copy())
         su = float(V2.smoother(te / E_COL)); ucol = 1.0 - su   # cam squares slide out to both edges: fullscreen inertial
         # camera (v2 ending): close in on the cluster as the Hall thrusters light and follow it ~3.5 s, then stop following and pull
@@ -896,7 +922,7 @@ while True:
         if TM_D >= P_H30 - 1e-6:
             A.arrived = True; W.v_dock = np.zeros(3); A.d = float(np.linalg.norm(p_new)); print(f"[t={W.t:7.2f}] docker at the 30 m hold ({A.d:.1f} m)", flush=True)
     else:
-        t_old_i = TM_I; TM_I = min(33500.0, TM_I + dts * (APPROACH_WARP if A.ph == "FINAL APPROACH" else 1.0)); [clock_burns(kk, t_old_i, TM_I) for kk in (1, 2)]
+        t_old_i = TM_I; TM_I = (TM_I + dts * (APPROACH_WARP if A.ph == "FINAL APPROACH" else 1.0)); [clock_burns(kk, t_old_i, TM_I) for kk in (1, 2)]
     place_free_flyers(); W.t_mission = TM_I
     # ---- autonomy (estimate only)
     est_ok = filt.q is not None

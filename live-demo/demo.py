@@ -967,7 +967,7 @@ while True:
         W.R_sc["docker"] = W.R_IB @ A.rel[0]; W.sc["docker"] = W.R_IB @ A.rel[1]; W.w_dock = A.rel[0].T @ W.w
         if A.ph == "DOCKED" and t_demo - A.t_dock_demo >= 3.0: A.set("DETUMBLE", W.t); A.t_detumble = W.t
         elif A.ph == "DETUMBLE" and np.linalg.norm(W.w) < 0.00175: A.set("STABLE", W.t); A.t_stable_demo = t_demo; grip_report["detumble_hydrazine_kg"] = round(STATS["fuel_detumble_kg"], 3); grip_report["detumble_h"] = round((W.t - A.t_detumble) / 3600, 2)
-        elif A.ph == "STABLE" and W.t - A.t_ph > 5: A.set("RELEASE", W.t)
+        elif A.ph == "STABLE" and W.t - A.t_ph > 3: A.set("RELEASE", W.t)   # Daniel: rates hit 0 -> pause 3 s
         elif A.ph == "RELEASE":   # claw opens (2 s), then the docker lets go
             ARM_S = min(1.0, ARM_S + dt * (1 - ARM_CLOSED) / 2.0)
             if ARM_S >= 1.0: W.attached = False; J_TRUE = J.copy(); A.set("BACK OFF", W.t); A.bo_v = 0.0

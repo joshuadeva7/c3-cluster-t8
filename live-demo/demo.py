@@ -529,10 +529,10 @@ def rect_hit(m_, rects, pad=0):
         x0, y0, x1, y1 = (int(v) for v in r)
         if m_[max(0, y0 - pad):max(0, y1 + pad), max(0, x0 - pad):max(0, x1 + pad)].any(): return True
     return False
-LF = 0.65   # soft floor of the auto zoom for trail / orbit lines
+LF = 0.8   # soft floor of the auto zoom for trail / orbit lines (0.65 tested: zoom ratchets to 0.3 at docking, worse)
 def main_frame(Rc, Pc, d, v, cx, roles_s, fl, rects, lift=0.0, tails=None, hide_far=True):
     """inertial main pane, full window, zoomed out just enough that no craft / TOPEX (strict: hard rule, down to 0.3x) and no trail /
-    ring / dot line (soft: down to 0.65x, since trails run off-screen and would force an endless zoom-out) sits under the overlay rects."""
+    ring / dot line (soft: down to 0.8x, since trails run off-screen and would force an endless zoom-out) sits under the overlay rects."""
     global ZM
     for _ in range(8):
         img, mk = render_main(Rc, Pc, d, v, WIN_W, cx, roles_s, fl, tails=tails, hide_far=hide_far, want_mask=True, lift=lift, zoom=ZM)

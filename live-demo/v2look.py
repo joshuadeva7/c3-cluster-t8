@@ -72,8 +72,9 @@ class Look:
             if zz[0] > 0 and np.isfinite(xy).all():
                 ov = img.copy(); cv2.circle(ov, (int(xy[0, 0]), int(xy[0, 1])), max(2, int(0.5 * math.sqrt(22) * self.lw)), bgr(MUTED), 1, cv2.LINE_AA); cv2.addWeighted(ov, 0.8, img, 0.2, 0, img)
         # keep-out (22 m) and 200 m spheres
-        cxy, cz = self.project(R, P, np.zeros(3), cx)
-        for Rr, col, a0, dash in ((22.0, C_RED, 0.55, False), (200.0, MUTED, 0.45, True)):
+        cxy, cz = self.project(R, P, np.zeros(3), cx); self.after_vbar = img.copy()
+        for Rr, col, a0, dash in ((200.0, MUTED, 0.45, True), (22.0, C_RED, 0.55, False)):
+            if Rr == 22.0: self.after_vbar = img.copy()   # reference geometry (V-bar line, hold markers, 200 m sphere) drawn before this; everything after is content
             vis = a0 * (1 - ss(Rr * 40, Rr * 80, d)) * (1 - ss(57.5, 59, v) * (Rr == 200))
             if vis < 0.01 or cz[0] <= 0: continue
             rp = self.F * Rr / cz[0]; th = np.linspace(0, 2 * np.pi, 361); ring = np.c_[cxy[0, 0] + rp * np.cos(th), cxy[0, 1] + rp * np.sin(th)]

@@ -529,21 +529,22 @@ def rect_hit(m_, rects, pad=0):
         x0, y0, x1, y1 = (int(v) for v in r)
         if m_[max(0, y0 - pad):max(0, y1 + pad), max(0, x0 - pad):max(0, x1 + pad)].any(): return True
     return False
+LF = 0.65   # soft floor of the auto zoom for trail / orbit lines
 def main_frame(Rc, Pc, d, v, cx, roles_s, fl, rects, lift=0.0, tails=None, hide_far=True):
     """inertial main pane, full window, zoomed out just enough that no craft / TOPEX (strict: hard rule, down to 0.3x) and no trail /
-    ring / dot line (soft: down to 0.8x, since trails run off-screen and would force an endless zoom-out) sits under the overlay rects."""
+    ring / dot line (soft: down to 0.65x, since trails run off-screen and would force an endless zoom-out) sits under the overlay rects."""
     global ZM
     for _ in range(8):
         img, mk = render_main(Rc, Pc, d, v, WIN_W, cx, roles_s, fl, tails=tails, hide_far=hide_far, want_mask=True, lift=lift, zoom=ZM)
         ln = LOOK.lines_mask
-        hs, hl = rect_hit(mk, rects, 6), rect_hit(ln, rects, 4) and ZM > 0.8
+        hs, hl = rect_hit(mk, rects, 6), rect_hit(ln, rects, 4) and ZM > LF
         if not (hs or hl):
-            if not rect_hit(mk, rects, 60) and not (ZM < 0.8 or rect_hit(ln, rects, 30)): ZM = min(1.0, ZM * 1.01)
-            elif not rect_hit(mk, rects, 60) and ZM < 0.8: ZM = min(0.8, ZM * 1.01)
+            if not rect_hit(mk, rects, 60) and not (ZM < LF or rect_hit(ln, rects, 30)): ZM = min(1.0, ZM * 1.01)
+            elif not rect_hit(mk, rects, 60) and ZM < LF: ZM = min(LF, ZM * 1.01)
             elif rect_hit(mk, rects, 25): ZM = max(0.3, ZM * 0.993)
             break
         if ZM <= 0.3: break
-        ZM = max(0.3 if hs else 0.8, ZM * 0.92)
+        ZM = max(0.3 if hs else LF, ZM * 0.92)
     return img, mk
 CH_Z = 1.0   # chase-cam dolly (1 = nominal offset; < 1 pulls the camera back)
 def chase_render(w, h, FIRE, rects=()):

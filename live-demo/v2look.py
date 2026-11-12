@@ -33,7 +33,7 @@ def cam(v, el_override=True):
 
 class Look:
     def __init__(self, W, H):
-        self.W, self.H = W, H; self.cy = H / 2; self.F = (W / 2) / math.tan(math.radians(34.0) / 2); self.lw = (100 * W / 1920) / 72.0   # matplotlib pt -> px
+        self.W, self.H = W, H; self.cy = H / 2; self.keepout_alpha = 1.0; self.F = (W / 2) / math.tan(math.radians(34.0) / 2); self.lw = (100 * W / 1920) / 72.0   # matplotlib pt -> px
         y, x = np.mgrid[0:H, 0:W]; r = np.sqrt(((x - W / 2) / (W / 2)) ** 2 + ((y - H / 2) / (H / 2)) ** 2)
         self.vig = (1 - np.clip((r - 0.75) / 0.7, 0, 1) ** 1.6 * 0.55).astype(np.float32)[..., None]
     def K(self, cx, cy=None): return np.array([[self.F, 0, cx], [0, self.F, self.cy if cy is None else cy], [0, 0, 1.0]])
@@ -76,6 +76,7 @@ class Look:
         for Rr, col, a0, dash in ((200.0, MUTED, 0.45, True), (22.0, C_RED, 0.55, False)):
             if Rr == 22.0: self.after_vbar = img.copy()   # reference geometry (V-bar line, hold markers, 200 m sphere) drawn before this; everything after is content
             vis = a0 * (1 - ss(Rr * 40, Rr * 80, d)) * (1 - ss(57.5, 59, v) * (Rr == 200))
+            if Rr == 22.0: vis *= self.keepout_alpha   # live demo: the keep-out sphere fades once the docker is cleared inside it
             if vis < 0.01 or cz[0] <= 0: continue
             rp = self.F * Rr / cz[0]; th = np.linspace(0, 2 * np.pi, 361); ring = np.c_[cxy[0, 0] + rp * np.cos(th), cxy[0, 1] + rp * np.sin(th)]
             if dash:

@@ -555,7 +555,7 @@ def chase_render(w, h, FIRE, rects=()):
     f = 0.5 * MAIN_W / math.tan(math.radians(33.0))
     # auto-reframe: if the docker / TOPEX reach into the bottom-left inset or the bottom error line, the picture slides right / up
     # (re-rendered at once, so no frame shows it covered); it drifts back slowly once clear. Not when TOPEX fills the frame (docked).
-    for _ in range(14):
+    for _ in range(24):
         pc_ = pd_ + Rd_ @ (CHASE_OFF * np.array([-1.0, 1.0, 1.0]) / CH_Z); Rc_ = look_at(pc_, aim, up=Rd_[:, 2])   # from the docker's -x side
         Kc = np.array([[f, 0, 0.50 * MAIN_W + CH_SH[0]], [0, f, 0.40 * h - CH_SH[1]], [0, 0, 1.0]])
         ccol, dep = render_view(Rc_, pc_, own=None, Kc=Kc, head=0.6, znear=0.05, wh=(w, h)); base = cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR)
@@ -566,9 +566,9 @@ def chase_render(w, h, FIRE, rects=()):
             if not m_[h - INS_H - 70:, :INS_W + 70].any() and not m_[h - 100:, :].any() and not rect_hit(m_, rects, 60):
                 CH_SH[0] = max(0.0, CH_SH[0] - 1.5); CH_SH[1] = max(0.0, CH_SH[1] - 1.0); CH_Z = min(1.0, CH_Z * 1.004)
             break
-        if hit_r or (CH_SH[0] >= 200 and CH_SH[1] >= 120) or m_.mean() > 0.15:
-            if CH_Z <= 0.2: break
-            CH_Z = max(0.2, CH_Z * 0.9); continue
+        if hit_r or (hit_c and (hit_i or hit_t)) or (CH_SH[0] >= 200 and (hit_i or hit_c)) or (CH_SH[1] >= 120 and (hit_i or hit_t)) or m_.mean() > 0.3:
+            if CH_Z <= 0.35: break
+            CH_Z = max(0.35, CH_Z * 0.9); continue
         CH_SH[0] = min(200.0, CH_SH[0] + (16.0 if (hit_i or hit_c) else 0.0))
         CH_SH[1] = float(np.clip(CH_SH[1] + (-10.0 if hit_c else (10.0 if (hit_i or hit_t) else 0.0)), 0.0, 120.0))
     return out_, m_
@@ -1019,6 +1019,7 @@ while True:
     elif A.ph == "STABLE": MAIN, INSET = ("chase", "inertial") if t_demo - A.t_stable_demo < 1.0 else ("inertial", None)
     elif A.ph in ("RELEASE", "BACK OFF"): MAIN, INSET = "inertial", "arm"
     else: MAIN, INSET = "inertial", None
+    if A.ph in ("FINAL APPROACH", "GRIP", "DOCKED", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DEPART"): LOOK.keepout_alpha = max(0.0, LOOK.keepout_alpha - dt / 2.0)
     LIFT = 30.0 * a_pan; cx_m = 640.0 - (640.0 - MAIN_W / 2.0) * a_pan       # picture centred in the area left of the column
     col_r = (xcol, 0, WIN_W, WIN_H) if a_pan > 0 else None; clock_r = (0, 0, 215, 46); ins_r = (0, WIN_H - INS_H, INS_W, WIN_H) if INSET == "inertial" else ((0, WIN_H - ARMRES, ARMRES, WIN_H) if INSET == "arm" else None)
     ex0 = ins_r[2] if ins_r is not None else 0; err_r = ((ex0 + MAIN_W) / 2 - 250, WIN_H - 40, (ex0 + MAIN_W) / 2 + 250, WIN_H - 8)

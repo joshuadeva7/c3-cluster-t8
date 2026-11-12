@@ -299,7 +299,11 @@ def acquire(cam="imagerA", group="I"):
     for h, n_ in zip(hyps, nin_h):
         if h is not None and n_ > best[0]: best = (n_, h)
     if best[1] is None or best[0] < 25: return False
+    # re-acquire after a detected loss: the 60 deg fault is in the attitude only, so the converged body rates are kept (resetting them
+    # to zero made the guidance despin the docker and re-converge at 1x for minutes)
+    w_keep = filt.w.copy() if getattr(A, "resume", None) else None
     filt.q = None; filt.w = np.zeros(3); filt.P = np.diag([0.3] * 3 + [0.5] * 3) ** 2; filt.Pp = np.diag([5.0] * 3 + [1.0] * 3) ** 2; filt.v = np.zeros(3)
+    if w_keep is not None: filt.w = w_keep   # covariance stays loose: the kept rates may predate full convergence
     filt.update(Rc @ best[1][0], Rc @ best[1][1] + pc); return True
 
 # ------------------------------------------------------------------ dashboard
@@ -334,6 +338,8 @@ def parse_script(s):
     return sorted(ev, key=lambda e: e[0])   # stable: same-time events keep their written order (w= before go)
 EV = parse_script(a.script)
 sliders = {"wx": 0.0, "wy": RATE_LIMITS["wy_default"], "wz": 0.0}
+def corrupt_estimate():   # the hidden X key: rotate the estimate 60 deg off the truth
+    filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
 def apply_cmd(cmd):
     if cmd.startswith("w="):
         v = [float(x) for x in cmd[2:].split(",")]; v = np.clip(v, -WMAX3, WMAX3)
@@ -342,7 +348,9 @@ def apply_cmd(cmd):
             if nm in UI_SLIDERS: UI_SLIDERS[nm].val = float(x)
     elif cmd == "go": A.go = True
     elif cmd == "loss":   # corrupt the estimate by 60 deg: the pipeline must notice and re-acquire
-        if filt.q is not None and A.ph not in ("FINAL APPROACH", "GRIP", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DONE"): filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
+        if filt.q is not None and A.ph == "SPIN-MATCH" and not getattr(A, "relock", False):
+            A.loss_pending = True   # blind coast: nothing could notice it now -> applied the moment vision re-locks (caught there)
+        elif filt.q is not None and A.ph not in ("FINAL APPROACH", "GRIP", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DONE"): corrupt_estimate()
     elif cmd == "ir":     # imagerA's visible camera (MSSS LCAM) fails: ~2.5 s dark, then its MSSS ECAM-IR3A LWIR camera takes over
         if IR["cam"] is None: IR.update(cam="imagerA", t_fail=W.t, last=-1e9, img=None); STATS["ir_t"].append(round(W.t, 2))
     elif cmd == "light": W.sun = Rot.from_euler("z", 75, degrees=True).as_matrix() @ W.sun; STATS["light_t"].append(round(W.t, 2))
@@ -515,7 +523,14 @@ while True:
     # COAST (Daniel 2026-11-11): wx = wz = 0 -> TOPEX spins steadily about one fixed axis, fully predictable once converged. Through
     # SPIN-MATCH the cameras are paused and the MEKF propagates on its rate estimate (any warp); when spin-match is reached it drops to
     # 1x and RE-LOCKS on vision (>= 10 accepted fixes) before FINAL APPROACH.
-    COAST = A.ph == "SPIN-MATCH" and not getattr(A, "relock", False) and filt.q is not None
+    # ... and only on a settled rate estimate: >= 20 s of tracking since the last (re-)acquire (a normal run has ~21 s); before that
+    # SPIN-MATCH runs at 1x on vision (an X press during CONVERGE left 7 s, and the coast then chased a nutating rate estimate)
+    COAST = A.ph == "SPIN-MATCH" and not getattr(A, "relock", False) and filt.q is not None and W.t - getattr(A, "t_acq", 0.0) >= getattr(A, "settle", 20.0)
+    if COAST and getattr(A, "t_coast0", None) is None: A.t_coast0 = W.t
+    if not COAST: A.t_coast0 = None
+    if COAST and W.t - A.t_coast0 > 60.0:   # watchdog: a coast this long means the coasted rates are off -> back to 1x on vision, re-settle, replan
+        A.t_acq = W.t; A.settle = 10.0; A.delta_goal = None; A.t_coast0 = None; COAST = False
+        if _os.environ.get("DEMO_DEBUG"): print(f"[coast watchdog t={W.t:.1f}]", flush=True)
     FIRE = dict(tau=np.zeros(3), big=False, dv=np.zeros(3), det=None)   # what the docker's thrusters did this frame (for the plumes)
     if W.attached:
         pass   # gripped: TOPEX state comes from the docker's IMU through the rigid grip
@@ -526,6 +541,8 @@ while True:
         t0 = time.perf_counter(); ok = acquire(); t_model = time.perf_counter() - t0
         if ok:
             if STATS["loss_t"] and (not STATS["reacq_t"] or STATS["reacq_t"][-1] < STATS["loss_t"][-1]): STATS["reacq_t"].append(round(W.t, 2))
+            A.settle = 10.0 if A.resume else 20.0; A.t_acq = W.t   # fresh vision before any coast: 20 s from scratch, 10 s on kept rates
+            if getattr(A, "resume", None) == "SPIN-MATCH": A.relock = False; A.delta_goal = None   # replan the clocking and coast again
             A.set(A.resume if hasattr(A, "resume") and A.resume else "CONVERGE", W.t); A.resume = None
     else:
         idx = [i for i, k in enumerate(CAMS) if not (k == "docker" and (W.attached or not 11.0 <= np.linalg.norm(filt.p - W.sc["docker"]) <= 60.0))
@@ -543,6 +560,8 @@ while True:
         else: lost_count += 1
         if lost_count >= 4 and A.ph not in ("FINAL APPROACH", "GRIP"):   # estimate no longer explains any camera -> re-acquire (autonomy pauses where it was)
             A.resume = A.ph if A.ph not in ("ACQUIRE", "CONVERGE") else None; A.set("ACQUIRE", W.t); filt.q = None; lost_count = 0
+            if getattr(A, "pf_hist", None):   # drop the COM average's last ~20 frames: they came from the estimate that just failed
+                A.pf, A.npf = A.pf_hist[0]; A.pf_hist.clear()
     # ---- time step
     warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph == "BACK OFF" else (a.spinmatch_warp if COAST else 1.0)); dts = dt * warp
     if A.ph == "DETUMBLE":
@@ -588,6 +607,8 @@ while True:
     # TOPEX COM for guidance: mean of the vision-updated estimate (fixed point: COM unforced), from 5 s into CONVERGE on, skipping
     # COAST frames (no new fixes there: averaging the propagated value would crowd out the real data); window capped at 300 frames
     if est_ok and not COAST and A.ph in ("CONVERGE", "HOLD 30 m", "SPIN-MATCH", "FINAL APPROACH", "GRIP") and not (A.ph == "CONVERGE" and W.t - A.t_ph < 5.0):
+        if not hasattr(A, "pf_hist"): A.pf_hist = collections.deque(maxlen=20)
+        A.pf_hist.append((None if getattr(A, "pf", None) is None else A.pf.copy(), getattr(A, "npf", 0)))
         A.npf = getattr(A, "npf", 0) + 1
         A.pf = p_est.copy() if getattr(A, "pf", None) is None else A.pf + (p_est - A.pf) / min(A.npf, 300)
     if est_ok and A.ph in ("SPIN-MATCH", "FINAL APPROACH", "GRIP"):
@@ -612,13 +633,20 @@ while True:
         swing = (Rot.from_rotvec(-n * delta) * Rot.from_matrix(R_des @ Rd0.T)).as_rotvec()   # R_err = twist(n) after swing
         w_t = float(wI_est @ n); w_rel = w_t - float(W.wI_dock @ n)
         if A.ph == "SPIN-MATCH" and A.delta_goal is None:
-            # plan once: decelerate the relative spin at 0.7 alpha so the docker arrives phase-locked on the v2 clocking
+            # plan once: brake the relative spin late at 0.9 alpha so the docker arrives phase-locked on the v2 clocking
             A.delta_u = delta; A.delta_prev = delta
-            A.delta_goal = 2 * math.pi * math.ceil((delta + w_rel * abs(w_rel) / (2 * 0.7 * DOCK_ALPHA)) / (2 * math.pi) - 1e-9)
+            # nearest clocking the docker can reach WITHOUT overshooting (overshoot = leading TOPEX, capped at +0.06 rad/s: ~100 s at
+            # wy 0.5). Brake budget 0.9 alpha.
+            a9 = 0.9 * DOCK_ALPHA; s9 = (delta + w_rel * abs(w_rel) / (2 * a9)) / (2 * math.pi)
+            if abs(w_rel) < 0.05: g = round(delta / (2 * math.pi))   # nearly matched (re-plan after a re-acquire): nearest clocking
+            else: g = math.ceil(s9 - 1e-9) if w_rel > 0 else math.floor(s9 + 1e-9)
+            A.delta_goal = 2 * math.pi * g; dist = abs(A.delta_goal - delta)
+            A.a_prof = a9; A.w_cruise = max(abs(w_rel), 0.15)   # cruise at the current relative spin, brake late at 0.9 alpha (time-optimal)
+            if _os.environ.get("DEMO_DEBUG"): print(f"[plan delta={math.degrees(delta):.1f} w_rel={w_rel:.3f} s9={s9:.3f} g={g} a_prof/alpha={A.a_prof / DOCK_ALPHA:.2f}]", flush=True)
         if A.delta_goal is not None:
             A.delta_u += (delta - A.delta_prev + math.pi) % (2 * math.pi) - math.pi; A.delta_prev = delta; e_tw = A.delta_goal - A.delta_u
         else: e_tw = delta
-        dd_des = math.copysign(min(math.sqrt(2 * 0.7 * DOCK_ALPHA * abs(e_tw)), 0.6 * abs(e_tw)), e_tw)
+        dd_des = math.copysign(min(math.sqrt(2 * getattr(A, 'a_prof', 0.7 * DOCK_ALPHA) * abs(e_tw)), 0.6 * abs(e_tw), getattr(A, 'w_cruise', 9.9)), e_tw)
         sn = np.linalg.norm(swing); a_sw = RW_TAU / 41.62 if sn < math.radians(3.0) else DOCK_TAU / 41.62   # rate-profile shaping only; the Euler step below enforces the per-wheel 0.25 N*m
         sw_rate = swing / sn * min(0.8 * sn, math.sqrt(2 * 0.8 * a_sw * sn)) if sn > 1e-9 else np.zeros(3)
         w_cmd = (wI_est - (wI_est @ n) * n) + n * (w_t - dd_des) + sw_rate
@@ -668,7 +696,9 @@ while True:
             att_e = np.degrees(np.linalg.norm(Rot.from_matrix(R_des @ Rd0.T).as_rotvec()))   # before this step's rotation
             if _os.environ.get("DEMO_DEBUG") and int(W.t * 10) % 20 == 0: print(f"[sm t={W.t:.1f} e_tw={math.degrees(e_tw):.1f} swing={math.degrees(sn):.2f} wrel={w_rel_est:.2f} att={att_e:.2f} pn={pn:.2f} wd={math.degrees(np.linalg.norm(W.wI_dock)):.1f}]")
             if w_rel_est < 0.5 and att_e < 1.0 and pn < 0.05:
-                if not getattr(A, "relock", False): A.relock = True; A.relock_t0 = W.t; print(f"[t={W.t:7.2f}] spin matched on the coasted estimate -> 1x, re-locking on vision", flush=True)
+                if not getattr(A, "relock", False):
+                    A.relock = True; A.relock_t0 = W.t; print(f"[t={W.t:7.2f}] spin matched on the coasted estimate -> 1x, re-locking on vision", flush=True)
+                    if getattr(A, "loss_pending", False): A.loss_pending = False; corrupt_estimate()
                 elif sum(1 for tf in fix_times if tf > A.relock_t0) >= 10:
                     A.set("FINAL APPROACH", W.t); A.v_app = 0.0; A.t_fa_mission = W.t_mission; A.d_fa0 = A.d
         if A.ph == "GRIP" and not getattr(A, "closed", False):

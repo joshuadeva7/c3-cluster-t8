@@ -28,7 +28,7 @@ p.add_argument("--feat", default="xfeat-onnx-cpu" if sys.platform.startswith("li
 p.add_argument("--crop", type=int, default=192 if sys.platform.startswith("linux") else 256); p.add_argument("--camres", type=int, default=512)
 p.add_argument("--headless", action="store_true"); p.add_argument("--record", default="")
 p.add_argument("--script", default=""); p.add_argument("--T", type=float, default=0.0, help="headless run length (s); 0 = through the ending. Window mode never times out")
-p.add_argument("--spinmatch_warp", type=float, default=8.0, help="time warp while COASTING through SPIN-MATCH (docker spin-up on the 1 N*m couple takes >= ~27 s)")
+p.add_argument("--spinmatch_warp", type=float, default=4.0, help="time warp while COASTING through SPIN-MATCH (docker spin-up on the 1 N*m couple takes >= ~27 s)")
 p.add_argument("--fixed_dt", type=float, default=0.0, help="sim seconds per frame (0 = real time from the wall clock)")
 p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--no_prologue", action="store_true", help="jump straight to the docker-selection freeze")
 p.add_argument("--prologue_warp", type=float, default=400.0, help="mission-time warp while the imagers transfer into the NMC")
@@ -90,7 +90,8 @@ RW_ALPHA = RW_TAU / 41.62                  # wobble/swing tracking on the wheels
 KG_PER_NMS = 1.0 / (LEVER * ISP * G0)      # hydrazine per N*m*s of angular impulse at a 0.5 m lever: 9.27e-4 kg
 DETUMBLE_TAU = 0.5                         # TRR ConOps: one 1 N thruster x 0.5 m against H
 
-APPROACH_WARP = 10.0                       # final-approach TRANSLATION shown x10 (spin always drawn at its true rate)
+HOLD_S = 2.5                               # Daniel 2026-11-12: >= 2-3 s on the chase view before the hydrazine thrusters light (SPIN-MATCH)
+APPROACH_WARP = 15.0                       # final-approach TRANSLATION shown x15 (Daniel 2026-11-12: ~21 s on screen) (spin always drawn at its true rate)
 PADS = cad["arm_end_v"]
 # dish-clearance check geometry: TOPEX parts that are neither the bus nor the solar array (antenna dish + booms)
 # TOPEX dish = the largest appendage outside the bus box that is not the solar array (1,008-triangle dish on its boom, -x side)
@@ -307,7 +308,7 @@ CAMS = ["imagerA", "imagerB", "docker"]
 class Autonomy:
     PH = ["PROLOGUE", "RATE SELECTION", "ACQUIRE", "CONVERGE", "HOLD 30 m", "SPIN-MATCH", "FINAL APPROACH", "GRIP", "DOCKED", "DETUMBLE", "STABLE", "RELEASE", "BACK OFF", "DEPART"]
     def __init__(self): self.ph = "PROLOGUE"; self.arrived = False; self.t_ph = 0.0; self.go = False; self.conv_t = 0.0; self.d = HOLD_D; self.blend = 0.0; self.log = []
-    def set(self, ph, t): self.ph = ph; self.t_ph = t; self.log.append((round(t, 2), ph)); print(f"[t={t:7.2f}] {ph}", flush=True)
+    def set(self, ph, t): self.ph = ph; self.t_ph = t; self.log.append((round(t, 2), ph)); print(f"[t={t:7.2f}] {ph}  (screen {globals().get('t_demo', 0.0):.1f} s)", flush=True)
 A = Autonomy()
 
 def acquire(cam="imagerA", group="I"):
@@ -904,7 +905,7 @@ while True:
     if A.ph == "CONVERGE":
         A.conv_t = A.conv_t + dts if sig_w < 0.5 else 0.0
         if A.conv_t > 3.0 and A.arrived: A.set("HOLD 30 m", W.t)
-    elif A.ph == "HOLD 30 m" and W.t - A.t_ph > 2.0: A.set("SPIN-MATCH", W.t); A.delta_goal = None
+    elif A.ph == "HOLD 30 m" and W.t - A.t_ph > HOLD_S: A.set("SPIN-MATCH", W.t); A.delta_goal = None
     # docker guidance from the ESTIMATE. Hold on TOPEX's (inertially fixed) H axis and let the gripper absorb the wobble (team ConOps S2):
     # spin-up / twist on the hydrazine thruster couple (1 N*m), wobble (swing) tracking on the RW8 wheels (0.25 N*m), translation 2 N.
     # TOPEX COM for guidance: mean of the vision-updated estimate (fixed point: COM unforced), from 5 s into CONVERGE on, skipping
@@ -1089,7 +1090,7 @@ while True:
     #      before the docker arrives: TOPEX close-up (estimate outline over truth); SPIN-MATCH: chase main + inertial misc; FINAL APPROACH
     #      (from its start) / GRIP / DOCKED: inertial main + arm cam; DETUMBLE (+1 s of STABLE): chase main + inertial misc; rest of STABLE:
     #      inertial main + chase misc; RELEASE / BACK OFF: arm cam; DEPART (zoom-out): chase misc. All squares drop after the zoom-out.
-    if A.ph == "SPIN-MATCH" and A.arrived: MAIN, MISC = "chase", "inertial"
+    if A.ph in ("HOLD 30 m", "SPIN-MATCH") and A.arrived: MAIN, MISC = "chase", "inertial"   # chase from the hold: HOLD_S of quiet before the thrusters
     elif A.ph in ("FINAL APPROACH", "GRIP", "DOCKED"): MAIN, MISC = "inertial", "arm"
     elif A.ph == "DETUMBLE": MAIN, MISC = "chase", "inertial"
     elif A.ph == "STABLE": MAIN, MISC = ("chase", "inertial") if t_demo - A.t_stable_demo < 1.0 else ("inertial", "chase")

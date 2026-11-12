@@ -565,8 +565,10 @@ def chase_render(w, h, FIRE, rects=()):
         hit_r = rect_hit(m_, rects, 8)                                                                                  # cam column
         if not (hit_i or hit_t or hit_c or hit_r):
             if not m_[h - INS_H - 70:, :INS_W + 70].any() and not m_[h - 100:, :].any() and not rect_hit(m_, rects, 60):
-                CH_SH[0] = max(0.0, CH_SH[0] - 1.5); CH_SH[1] = max(0.0, CH_SH[1] - 1.0); CH_Z = min(1.0, CH_Z * 1.004)
+                CH_SH[0] = CH_SH[0] - math.copysign(min(1.5, abs(CH_SH[0])), CH_SH[0]); CH_SH[1] = max(0.0, CH_SH[1] - 1.0); CH_Z = min(1.0, CH_Z * 1.004)
             break
+        if hit_r and not (hit_i or hit_c) and CH_SH[0] > -200:   # only the cam column is hit (an orbiting imager): slide the picture left
+            CH_SH[0] -= 16.0; continue
         if hit_r or (hit_c and (hit_i or hit_t)) or (CH_SH[0] >= 200 and (hit_i or hit_c)) or (CH_SH[1] >= 120 and (hit_i or hit_t)) or m_.mean() > 0.3:
             if CH_Z <= 0.35: break
             CH_Z = max(0.35, CH_Z * 0.9); continue

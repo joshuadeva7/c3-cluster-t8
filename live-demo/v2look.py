@@ -33,13 +33,13 @@ def cam(v, el_override=True):
 
 class Look:
     def __init__(self, W, H):
-        self.W, self.H = W, H; self.F = (W / 2) / math.tan(math.radians(34.0) / 2); self.lw = (100 * W / 1920) / 72.0   # matplotlib pt -> px
+        self.W, self.H = W, H; self.cy = H / 2; self.F = (W / 2) / math.tan(math.radians(34.0) / 2); self.lw = (100 * W / 1920) / 72.0   # matplotlib pt -> px
         y, x = np.mgrid[0:H, 0:W]; r = np.sqrt(((x - W / 2) / (W / 2)) ** 2 + ((y - H / 2) / (H / 2)) ** 2)
         self.vig = (1 - np.clip((r - 0.75) / 0.7, 0, 1) ** 1.6 * 0.55).astype(np.float32)[..., None]
-    def K(self, cx, cy=None): return np.array([[self.F, 0, cx], [0, self.F, self.H / 2 if cy is None else cy], [0, 0, 1.0]])
+    def K(self, cx, cy=None): return np.array([[self.F, 0, cx], [0, self.F, self.cy if cy is None else cy], [0, 0, 1.0]])
     def project(self, R, P, X, cx):
         Xc = (np.atleast_2d(X) - P) @ R; z = Xc[:, 2]; zc = np.where(z > 1e-6, z, np.nan)
-        return np.c_[cx + self.F * Xc[:, 0] / zc, self.H / 2 + self.F * Xc[:, 1] / zc], z
+        return np.c_[cx + self.F * Xc[:, 0] / zc, self.cy + self.F * Xc[:, 1] / zc], z
     def _blend_poly(self, img, pts, col, a, lw):
         pts = np.clip(pts[np.isfinite(pts).all(1)], -2e4, 2e4)
         if a <= 0.005 or len(pts) < 2: return
@@ -52,14 +52,14 @@ class Look:
     def background(self, R, P, cx, width):
         img = np.empty((self.H, width, 3), np.uint8); img[:] = BG
         z = STARS @ R[:, 2]; ok = z > 0.2; S = STARS[ok] @ R
-        uv = np.c_[cx + self.F * S[:, 0] / S[:, 2], self.H / 2 + self.F * S[:, 1] / S[:, 2]]; m = SMAG[ok]
+        uv = np.c_[cx + self.F * S[:, 0] / S[:, 2], self.cy + self.F * S[:, 1] / S[:, 2]]; m = SMAG[ok]
         inb = (uv[:, 0] > 0) & (uv[:, 0] < width - 1) & (uv[:, 1] > 0) & (uv[:, 1] < self.H - 1)
         for (x, y), mg in zip(uv[inb], m[inb]):
             rad = 0.5 * math.sqrt(0.4 + 5 * mg) * self.lw; a = 0.75 * min(1.0, rad * rad * 3.14 / 1.0) if rad < 0.56 else 0.75
             xi, yi = int(x), int(y); img[yi, xi] = np.clip(img[yi, xi] * (1 - a) + np.array([230, 216, 207]) * a, 0, 255)
             if rad > 0.9: cv2.circle(img, (xi, yi), int(round(rad)), (230, 216, 207), -1, cv2.LINE_AA)
         return img
-    def overlays(self, img, R, P, d, cx, v, t_k, roles_s, trail_end_alpha=1.0, burn_flash=()):
+    def overlays(self, img, R, P, d, cx, v, t_k, roles_s, trail_end_alpha=1.0, burn_flash=(), pos=None, tails=None, hide_far=True):
         """vector layers in v2's order. t_k: per-craft mission clocks (s, relative to TOPEX arrival); roles_s: 0 neutral -> 1 docker/imager colours."""
         # V-bar axis
         yl = np.linspace(-30000, 8000, 400); pts, z = self.project(R, P, np.c_[np.zeros_like(yl), yl, np.zeros_like(yl)], cx)
@@ -85,7 +85,9 @@ class Look:
         # trails (last 6800 s of each craft), glow + line, alpha ramps up toward the craft
         for k in range(3):
             col = role_col(k, roles_s); t1 = t_k[k]; ts = np.linspace(max(0.0, t1 - 6800.0), t1, 420)   # v2: trails start at TOPEX arrival
-            Pk = relv(k, ts); far = np.linalg.norm(Pk, axis=1) > 8.5e3; xy, z = self.project(R, P, Pk, cx); xy[far | (z <= 0)] = np.nan
+            Pk = relv(k, ts)
+            if tails is not None and len(tails[k]) > 1: Pk = np.vstack([Pk, np.asarray(tails[k])])   # the live departure, appended to the prox.csv trail
+            far = np.linalg.norm(Pk, axis=1) > (8.5e3 if hide_far else 1e9); xy, z = self.project(R, P, Pk, cx); xy[far | (z <= 0)] = np.nan
             al = np.linspace(0, 1, len(xy)) ** 1.6 * trail_end_alpha
             if k > 0: al = al * (0.3 + 0.7 * ss(60, 160, d))
             for j0 in range(0, len(xy) - 1, 20):   # piecewise alpha (21-point pieces)
@@ -96,7 +98,7 @@ class Look:
         # dots when small
         pxs = self.F * 10.0 / max(cz[0], 1e-6); self._dot(img, cxy[0], bgr(C_TGT), float(np.clip((14 - pxs) / 8, 0, 1)), 22)
         for k in range(3):
-            xy, z = self.project(R, P, rel(k, t_k[k]), cx); pxs = self.F * 2.0 / max(z[0], 1e-6)
+            xy, z = self.project(R, P, rel(k, t_k[k]) if pos is None else pos[k], cx); pxs = self.F * 2.0 / max(z[0], 1e-6)
             if z[0] > 0: self._dot(img, xy[0], bgr(role_col(k, roles_s)), float(np.clip((12 - pxs) / 7, 0, 1)), 14)
         for (k, u) in burn_flash:   # expanding burn rings
             xy, z = self.project(R, P, rel(k, t_k[k]), cx)

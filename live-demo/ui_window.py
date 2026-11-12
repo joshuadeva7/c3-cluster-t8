@@ -1,12 +1,12 @@
 """Single-window UI for the live demo (no OpenCV GUI): one pyglet window owns the only GL context; the scene renders
-offscreen into FBOs in that same context, the canvas (numpy) is blitted as a texture, and the docker-selection panel's
-sliders and GO button are drawn into the canvas and driven by pyglet mouse/key events. Headless mode uses a standalone
+offscreen into FBOs in that same context, the canvas (numpy) is blitted as a texture, and the rate-selection pop-up's
+slider and GO button are drawn into the canvas and driven by pyglet mouse/key events. Headless mode uses a standalone
 GL context. Works on macOS (Cocoa, GL 3.3 core) and Linux/X11.
-The picture fills the whole window (no control band). The only on-screen controls are the docker-selection panel
-(mode "select": 3 TOPEX body-rate sliders + GO, GO greyed out until it is valid). Keys: Enter/S start, Space skip the
+The picture fills the whole window (no control band). The only on-screen controls are the rate-selection pop-up
+(mode "select": the TOPEX Angular Rate Selection pop-up, omega-y slider + GO, GO greyed out until it is valid). Keys: Enter/S start, Space skip the
 cutscene, G = GO, P = pause, Esc/Q = quit; hidden test keys X (pose error), L (rotate the sun), I (visible camera fails -> infrared)."""
 import numpy as np, moderngl, cv2
-import gl_render
+import gl_render, uitext as UT
 
 F = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -19,8 +19,9 @@ class Slider:
         cv2.line(img, (self.x, self.y), (self.x + self.w, self.y), (90, 90, 90), 3, cv2.LINE_AA)
         x0 = self.x + int((0 - self.lo) / (self.hi - self.lo) * self.w); cv2.line(img, (x0, self.y - 7), (x0, self.y + 7), (110, 110, 110), 1)
         u = (self.val - self.lo) / (self.hi - self.lo); cx = self.x + int(u * self.w)
-        cv2.circle(img, (cx, self.y), 8, (60, 170, 255) if enabled else (80, 80, 80), -1, cv2.LINE_AA)
-        cv2.putText(img, f"{self.name} {self.val:+.3f} rad/s", (self.x + self.w + 16, self.y + 5), F, 0.48, col, 1, cv2.LINE_AA)
+        cv2.circle(img, (cx, self.y), 9, (255, 255, 255) if enabled else (80, 80, 80), -1, cv2.LINE_AA)   # white knob (Daniel 2026-11-12)
+        lab = {"wx": "\u03c9x", "wy": "\u03c9y", "wz": "\u03c9z"}.get(self.name, self.name)          # real omega glyph
+        UT.draw(img, [(lab + " ", False), (f"{self.val:+.3f}", True), (" rad/s", False)], self.x + self.w + 18, self.y - 10, 16, col)
 
 class Button:
     def __init__(self, label, key, x, y, w=100, h=24): self.label, self.key, self.x, self.y, self.w, self.h = label, key, x, y, w, h
@@ -37,14 +38,14 @@ QUAD_FS = "#version 330\nuniform sampler2D tex; in vec2 uv; out vec4 f; void mai
 
 class Display:
     """show(canvas_bgr) -> list of events: ('key', ch) / ('slider', name, value)."""
-    PANEL = (370, 170, 910, 530)   # docker-selection panel rect (x0, y0, x1, y1), centred on the 1280 x 720 picture
+    PANEL = (300, 130, 980, 590)   # TOPEX angular-rate selection panel rect (x0, y0, x1, y1), centred on the 1280 x 720 picture
     def __init__(self, W, H, headless, title="SWARM live demo", wmax=1.0, w0=(0.0, 0.661, 0.0)):
         self.W, self.H, self.headless = W, H, headless; self.events = []; self.drag = None; self.closed = False; self.mode = "none"; self.hover = False
         self.go_enabled = False
         x0, y0, x1, y1 = self.PANEL
         wm = wmax if isinstance(wmax, (tuple, list)) else (wmax,) * 3   # per-axis slider range
         axes = [(n, v, m) for n, v, m in zip(("wx", "wy", "wz"), w0, wm) if m > 0]   # an axis capped at 0 gets no slider (Daniel: wx = wz = 0)
-        self.sliders = [Slider(n, x0 + 40, y0 + 190 + 40 * i, 280, -m, m, v) for i, (n, v, m) in enumerate(axes)]
+        self.sliders = [Slider(n, x0 + 40, y0 + 300 + 40 * i, 400, -m, m, v) for i, (n, v, m) in enumerate(axes)]
         self.go = Button("GO", "g", (x0 + x1) // 2 - 80, y1 - 62, 160, 40)
         if headless:
             self.ctx = gl_render.make_context(True); self.win = None; return
@@ -85,15 +86,19 @@ class Display:
         def on_mouse_release(x, y, b, mod): self.drag = None
         @w.event
         def on_close(): self.closed = True; self.events.append(("key", "q"))
+    SENTENCE = ("This live demo will dock for a range of yaw rates on TOPEX. Introduce disturbances like lighting (press L), noise in the "
+                "imager estimates (press X), or full visual imager failure, resulting in a back up to infrared (press I) to test the robustness "
+                "of the computer vision software (running live in the physics sim) and autonomy algorithm.")   # Daniel 2026-11-12, verbatim
     def draw_select(self, img, go_enabled, lines):
-        """the docker-selection panel: title + context lines, the three TOPEX body-rate sliders, GO (greyed out until valid)."""
+        """the TOPEX angular-rate selection pop-up: white title, Daniel's sentence, the omega-y slider, the GO prompt, GO (greyed out until valid)."""
         self.mode = "select"; self.go_enabled = go_enabled; x0, y0, x1, y1 = self.PANEL
-        ov = img.copy(); cv2.rectangle(ov, (x0, y0), (x1, y1), (14, 12, 10), -1); cv2.addWeighted(ov, 0.86, img, 0.14, 0, img)
+        ov = img.copy(); cv2.rectangle(ov, (x0, y0), (x1, y1), (14, 12, 10), -1); cv2.addWeighted(ov, 0.88, img, 0.12, 0, img)
         cv2.rectangle(img, (x0, y0), (x1, y1), (120, 120, 120), 1)
-        cv2.putText(img, "DOCKER SELECTION", (x0 + 40, y0 + 46), F, 0.85, (90, 175, 245), 2, cv2.LINE_AA)
-        for j, ln in enumerate(lines): cv2.putText(img, ln, (x0 + 40, y0 + 80 + 22 * j), F, 0.5, (215, 215, 215), 1, cv2.LINE_AA)
-        cv2.putText(img, "TOPEX roll spin rate wy (spin starts on GO)", (x0 + 40, y0 + 140), F, 0.5, (170, 200, 230), 1, cv2.LINE_AA)
+        UT.draw(img, [("TOPEX Angular Rate Selection", True)], x0 + 40, y0 + 26, 26, (255, 255, 255))
+        for j, ln in enumerate(UT.wrap(self.SENTENCE, 16, x1 - x0 - 80)): UT.draw(img, ln, x0 + 40, y0 + 82 + 24 * j, 16, (225, 225, 225))
         for s in self.sliders: s.draw(img, True)
+        for j, ln in enumerate([l for l in lines if l]): UT.draw(img, ln, x0 + 40, y0 + 326 + 20 * j, 14, (120, 160, 255))
+        UT.draw(img, "Press GO to initiate TOPEX spin and autonomous settling", (x0 + x1) // 2, y1 - 104, 17, (255, 255, 255), anchor="c")
         self.go.draw(img, hover=self.hover and go_enabled, enabled=go_enabled)
     def show(self, canvas_bgr, mode=None):
         if mode is not None: self.mode = mode

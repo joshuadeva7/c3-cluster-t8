@@ -541,7 +541,7 @@ while True:
         t0 = time.perf_counter(); ok = acquire(); t_model = time.perf_counter() - t0
         if ok:
             if STATS["loss_t"] and (not STATS["reacq_t"] or STATS["reacq_t"][-1] < STATS["loss_t"][-1]): STATS["reacq_t"].append(round(W.t, 2))
-            A.settle = 10.0 if A.resume else 20.0; A.t_acq = W.t   # fresh vision before any coast: 20 s from scratch, 10 s on kept rates
+            A.settle = 10.0 if getattr(A, "resume", None) else 20.0; A.t_acq = W.t   # fresh vision before any coast: 20 s from scratch, 10 s on kept rates
             if getattr(A, "resume", None) == "SPIN-MATCH": A.relock = False; A.delta_goal = None   # replan the clocking and coast again
             A.set(A.resume if hasattr(A, "resume") and A.resume else "CONVERGE", W.t); A.resume = None
     else:

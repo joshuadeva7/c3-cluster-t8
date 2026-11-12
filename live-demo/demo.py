@@ -418,11 +418,21 @@ def emit(canvas, main_w, allow_pause=True):
 def title_screen():
     """ready screen: nothing starts until Enter (or S), so the demo can be queued before a talk."""
     canvas = np.empty((WIN_H, WIN_W, 3), np.uint8); canvas[:] = V2.BG
-    UT.draw(canvas, [("AE 4322 Team 8:", True)], 96, 196, 30, (240, 240, 240))   # one title, over two lines (too wide for one at this size)
-    UT.draw(canvas, [("Spacecraft With Autonomous Rendezvous and Manipulation", True)], 96, 238, 30, (240, 240, 240))
-    UT.draw(canvas, "C3 Track 6: Architecture of Autonomous Space Clusters", 98, 312, 23, (200, 205, 212))
-    UT.draw(canvas, "Live Autonomous Settling Demo", 98, 352, 18, (160, 166, 175))
-    UT.draw(canvas, "Press ENTER to begin", 98, 440, 18, (235, 235, 235))
+    # text wrapped in the left column, mission patch on the right (Daniel 2026-11-12)
+    PS = 400; px0, py0 = WIN_W - 70 - PS, (WIN_H - PS) // 2; TW = px0 - 50 - 96
+    blocks = [("AE 4322 Team 8: Spacecraft With Autonomous Rendezvous and Manipulation", 32, True, (240, 240, 240), 10),
+              ("C3 Track 6: Architecture of Autonomous Space Clusters", 23, False, (200, 205, 212), 8),
+              ("Live Autonomous Settling Demo", 18, False, (160, 166, 175), 40),
+              ("Press ENTER to begin", 18, False, (235, 235, 235), 0)]
+    lines = [(ln, sz, b, c) for txt_, sz, b, c, gap in blocks for ln in UT.wrap(txt_, sz, TW, b)]
+    hgt = sum(int(sz * 1.35) for _, sz, _, _ in lines) + sum(g for *_, g in blocks); y = (WIN_H - hgt) // 2
+    for txt_, sz, b, c, gap in blocks:
+        for ln in UT.wrap(txt_, sz, TW, b): UT.draw(canvas, [(ln, b)], 96, y, sz, c); y += int(sz * 1.35)
+        y += gap
+    pp = cv2.imread(_os.path.join(HERE, "assets", "swarm_patch.png"), cv2.IMREAD_UNCHANGED)
+    if pp is not None:
+        pp = cv2.resize(pp, (PS, PS), interpolation=cv2.INTER_AREA); al = pp[:, :, 3:4].astype(np.float32) / 255.0 if pp.shape[2] == 4 else 1.0
+        roi = canvas[py0:py0 + PS, px0:px0 + PS].astype(np.float32); canvas[py0:py0 + PS, px0:px0 + PS] = (roi * (1 - al) + pp[:, :, :3].astype(np.float32) * al).astype(np.uint8)
     if writer is not None:
         for _ in range(max(1, int(1 * a.fps_out))): writer.write(canvas)
     if a.headless: return True
@@ -494,6 +504,20 @@ def cover_log(stage, mask, rects, extra=None):
             x0, y0, x1, y1 = (int(v) for v in r); lc += int(lm[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].sum())
     COVER.write(json.dumps(dict(frame=frame, t_demo=round(t_demo, 2), stage=stage, ph=A.ph, content_px=tot, covered_px=cov, per=per, lines_covered_px=lc, **(extra or {}))) + "\n")
 LBL = {"docker": "docker", "imagerA": "imager A", "imagerB": "imager B"}
+# phase title pop-ups (Daniel 2026-11-12): top centre of the main pane, fade in 0.35 s, hold, fade out 0.5 s (2.8 s total).
+# None for TOPEX spin-up (it was always spinning) or the departure (its own message pops up). Pose estimation and the docker's
+# approach run at the same time after GO: one combined title.
+PT_DUR = 2.8; PT = [None, -99.0]; PT_SEEN = set(); t_ui = 0.0
+def phase_title(name):
+    if name in PT_SEEN: return
+    PT_SEEN.add(name); PT[0], PT[1] = name, t_ui
+def draw_phase_title(img):
+    if PT[0] is None: return None
+    u = t_ui - PT[1]
+    if u > PT_DUR: return None
+    al = min(1.0, u / 0.35) * min(1.0, max(0.0, (PT_DUR - u) / 0.5))
+    UT.draw(img, [(PT[0], True)], 642, 24, 26, (0, 0, 0), alpha=al * 0.7, anchor="c")      # soft shadow
+    return UT.draw(img, [(PT[0], True)], 640, 22, 26, (255, 255, 255), alpha=al, anchor="c")
 def formation_labels(img, Rc, Pc, cx, alpha):
     """small on-theme labels above each craft while the three are lined up on the V-bar, before the imagers leave for the NMC."""
     if alpha <= 0.01: return []
@@ -676,6 +700,7 @@ END_FRAME = None
 while True:
     c0 = time.perf_counter()
     wall = time.perf_counter(); dt = a.fixed_dt if a.fixed_dt > 0 else min(wall - last_wall, 0.25); last_wall = wall
+    t_ui += dt
     if STAGE == "PROLOGUE" and a.no_prologue: STAGE = "SELECT"; A.set("RATE SELECTION", 0.0); sel_t = 0.0; place_free_flyers()
     if STAGE == "PROLOGUE":
         t_old = TM_I; TM_I = min(P_NMC, TM_I + dt * (1.0 if t_live < 2.5 else a.prologue_warp)); T_VIS += dt; t_live += dt   # 2.5 s line-up hold (labels)
@@ -691,7 +716,9 @@ while True:
         rects = [("clock", draw_clock(img, alpha=ca))]
         la = (float(np.clip((t_live - 0.6) / 0.8, 0, 1)) if CUT_LAST is not None else 1.0) * (1.0 - float(V2.ss(4834.3, 5700.0, TM_I)))   # SC2 leaves the V-bar at 4834 s
         for b_ in formation_labels(img, Rm, Pm, 640.0, la): rects.append(("label", b_))
-        cover_log("PROLOGUE", cmask, rects[:1])
+        if t_live >= HANDOFF_FADE: phase_title("Roles Assigned + Imager Approach")
+        rects.append(("title", draw_phase_title(img)))
+        cover_log("PROLOGUE", cmask, rects[:1] + rects[-1:])
         if CUT_LAST is not None and t_live < HANDOFF_FADE:
             u = t_live / HANDOFF_FADE; img = (CUT_LAST * (1 - u) + img * u).astype(np.uint8)
         if frame == 0 or (CUT_LAST is not None and t_live <= dt + 1e-9): cv2.imwrite(_os.path.join(HERE, "runs", "frame_handoff_live.png"), img) if _os.path.isdir(_os.path.join(HERE, "runs")) else None
@@ -1090,9 +1117,13 @@ while True:
         else: mimg = misc_estimate(est_ok, R_est if est_ok else None, p_est if est_ok else None)
         COL_IMG = build_columns(grays, Rcs, pcs, Kcs, est_ok, R_est if est_ok else None, p_est if est_ok else None, mimg)
         paste_columns(canvas, COL_IMG, a_pan)
+    if t_go >= 0.2: phase_title("Pose Estimation + Docker Approach")
+    for ph_, nm_ in (("SPIN-MATCH", "Spin Matching"), ("FINAL APPROACH", "Final Approach"), ("GRIP", "Grip"), ("DOCKED", "Grip"), ("DETUMBLE", "Detumble"), ("STABLE", "Stable"), ("RELEASE", "Release")):
+        if A.ph == ph_ and (ph_ != "SPIN-MATCH" or A.arrived): phase_title(nm_)
+    tb = draw_phase_title(canvas)
     eb = err_text(canvas, att_err, rate_err, MAIN_X0, MAIN_X1)
     cb = draw_clock(canvas)
-    cover_log("OPS", cmask, [("errtext", eb), ("clock", cb)] + [("column", r_) for r_ in cr_], extra=dict(main=MAIN, misc=MISC, zoom=round(ZM if MAIN == "inertial" else CH_Z, 3)))
+    cover_log("OPS", cmask, [("errtext", eb), ("clock", cb), ("title", tb)] + [("column", r_) for r_ in cr_], extra=dict(main=MAIN, misc=MISC, zoom=round(ZM if MAIN == "inertial" else CH_Z, 3)))
     if A.ph == "DEPART" and t_demo - A.t_dep_demo >= ZOOM_T: end_begin(COL_IMG)
     r = emit(canvas, MAIN_W); frame += 1
     if r == "quit": break

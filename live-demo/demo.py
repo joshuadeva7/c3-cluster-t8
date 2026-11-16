@@ -899,7 +899,38 @@ def hall_plumes(img, Rc, Pc, cx, taus):
             V2._blend_roi(img, q_, t_ + 3, al * pa, lambda ov, q: cv2.line(ov, (int(q[0, 0]) // 16, int(q[0, 1]) // 16), (int(q[1, 0]) // 16, int(q[1, 1]) // 16), c_, t_, cv2.LINE_AA))
 quit_all = False
 END_FRAME = None
+RESTARTS_DONE = 0
+# ---- in-place restart (Daniel 2026-11-16: "hitting enter at the end to restart, wish it didnt have to relaunch"): every piece of run
+#      state (sim, filter, autonomy, clocks, trails, rng, stats) is copied here, once, at the start of the live run; Enter on the patch
+#      card puts it all back and goes to the title card in the same window (no relaunch, no reload, no backend self-test).
+import copy as _copy, types as _types
+_KEEP = {"DISP", "world", "mainsc", "ref", "LOOK", "TRK", "FEAT", "writer", "COVER", "CLK_LOG", "_POOL", "_FT", "UI_SLIDERS", "HQ", "cad",
+         "SW", "DOCK_ARM", "tm", "TOPEX_KD", "PATCH", "_pp", "a", "p", "SELFTEST", "CUT_LAST", "INR", "_m0", "_dish", "FALLBACK"}
+def _snap_ok(k, v):
+    if k in _KEEP or k.startswith("__") or k in ("_RUN0", "_snap_ok", "_KEEP"): return False
+    return not isinstance(v, (_types.ModuleType, _types.FunctionType, _types.BuiltinFunctionType, type))
+_RUN0 = {}
+for _k, _v in list(globals().items()):
+    if _snap_ok(_k, _v):
+        try: _RUN0[_k] = _copy.deepcopy(_v)
+        except Exception: pass
+def restart_run():
+    global SPEC
+    if SPEC is not None: spec_cancel(SPEC); SPEC = None
+    g = globals()
+    for k in [k for k in g if k not in _RUN0 and _snap_ok(k, g[k]) and k[:1].isupper() and k.startswith(("END_", "SEL_"))]: del g[k]   # set by end_begin / SELECT
+    for k, v in _RUN0.items(): g[k] = _copy.deepcopy(v)
+    UI_SLIDERS["wy"].val = RATE_LIMITS["wy_default"]; DISP.mode = "none"
+    set_scene_poses()
+    if not title_screen(): return False
+    cl = None if a.no_cutscene else play_cutscene()
+    if isinstance(cl, str): return False
+    g["CUT_LAST"] = cl; g["last_wall"] = time.perf_counter(); return True
 while True:
+    if RESTARTS_DONE == 0 and _os.environ.get("DEMO_RESTART_AT") and t_demo >= float(_os.environ["DEMO_RESTART_AT"]):   # verification: restart mid-run
+        print(f"[restart test] restarting in place at screen {t_demo:.1f} s, stage {STAGE}", flush=True)
+        if not restart_run(): break
+        RESTARTS_DONE = 1
     c0 = time.perf_counter()
     wall = time.perf_counter(); dt = a.fixed_dt if a.fixed_dt > 0 else min(wall - last_wall, 0.25); last_wall = wall
     t_ui += dt
@@ -957,9 +988,7 @@ while True:
             r = emit(END_FRAME, WIN_W, allow_pause=False); time.sleep(1 / 30)
             if r == "quit": break
             if "\r" in r or "s" in r:
-                try: DISP.close()
-                except Exception: pass
-                _os.execv(sys.executable, [sys.executable] + sys.argv)
+                if not restart_run(): break
             continue
         CLK_X = END_CLK if te >= E_HALL else 10.0; dclk = dt * CLK_X   # mission time keeps running: x10 (as in DEPART) until the Hall thrusters light
         T_CLOCK += dclk; TM_I += dclk
@@ -1000,6 +1029,10 @@ while True:
         r = emit(canvas, WIN_W, allow_pause=False); frame += 1
         if r == "quit": break
         if te >= E_DONE:
+            if a.headless and int(_os.environ.get("DEMO_RESTARTS", "0")) > RESTARTS_DONE:   # verification: restart in place, run again
+                _rd = RESTARTS_DONE + 1; json.dump(dict(phases=A.log, frame=frame), open(f"/tmp/restart_run{_rd}.json", "w"))
+                if not restart_run(): break
+                RESTARTS_DONE = _rd; continue
             if a.headless: break
             END_FRAME = canvas
         continue

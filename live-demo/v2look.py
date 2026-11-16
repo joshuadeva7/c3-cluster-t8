@@ -112,7 +112,7 @@ class Look:
                 rr_ = max(2, int(0.5 * math.sqrt(22) * self.lw)); th_ = max(1, int(round(self.S))); q = np.array([[int(xy[0, 0]) * 16, int(xy[0, 1]) * 16]], np.int32)
                 _blend_roi(img, q, rr_ + 3 + th_, 0.8, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]) // 16, int(q_[0, 1]) // 16), rr_, bgr(MUTED), th_, cv2.LINE_AA), b=0.2)
         # keep-out (22 m) and 200 m spheres
-        cxy, cz = self.project(R, P, np.zeros(3), cx); self.after_vbar = img.copy()
+        cxy, cz = self.project(R, P, np.zeros(3), cx)   # (after_vbar is taken in the 22 m pass below, which always runs first-thing)
         for Rr, col, a0, dash in ((200.0, MUTED, 0.45, True), (22.0, C_RED, 0.55, False)):
             if Rr == 22.0: self.after_vbar = img.copy()   # reference geometry (V-bar line, hold markers, 200 m sphere) drawn before this; everything after is content
             vis = a0 * (1 - ss(Rr * 40, Rr * 80, d)) * (1 - ss(57.5, 59, v) * (Rr == 200))

@@ -500,8 +500,14 @@ def warp_tag(img, x, y, s1, s2=None, alpha=1.0):
 def hms(t): t = max(0.0, t); return f"{int(t // 3600):d}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}"
 # ONE true mission clock (Daniel 2026-11-12): total elapsed mission time INCLUDING every speed-up, shown top-left and nowhere else.
 T_CLOCK = P_HOLD
+CLK_X = 1.0   # current fast-forward multiplier of T_CLOCK (mission seconds per real second), set wherever T_CLOCK advances
+CLK_LOG = open(_os.environ["DEMO_CLKLOG"], "w", buffering=1) if _os.environ.get("DEMO_CLKLOG") else None   # verification log
 def draw_clock(img, alpha=1.0):
-    warp_tag(img, 22, 32, f"T+{hms(T_CLOCK)}", None, alpha=alpha); return (14, 14, 200, 40)
+    if CLK_LOG is not None: CLK_LOG.write(f"{STAGE} {getattr(A, 'ph', '')} {T_CLOCK:.4f} {CLK_X:.4f}\n")
+    s1 = f"T+{hms(T_CLOCK)}"; s2 = f"x{int(round(CLK_X)):,}"
+    w1 = cv2.getTextSize(s1, F, 0.5, 1)[0][0]; w2 = cv2.getTextSize(s2, F, 0.5, 1)[0][0]
+    warp_tag(img, 22, 32, s1, None, alpha=alpha); warp_tag(img, 22 + w1 + 12, 32, s2, None, alpha=alpha)
+    return (14, 14, max(200, 22 + w1 + 12 + w2 + 8), 40)
 COVER = open(_os.environ["DEMO_COVER"], "w", buffering=1) if _os.environ.get("DEMO_COVER") else None   # overlay-coverage log (verification)
 def cover_log(stage, mask, rects, extra=None):
     """content pixels of the main pane hidden under each overlay rect (x0, y0, x1, y1). Written per frame when DEMO_COVER is set."""
@@ -725,7 +731,7 @@ while True:
     t_ui += dt
     if STAGE == "PROLOGUE" and a.no_prologue: STAGE = "SELECT"; A.set("RATE SELECTION", 0.0); sel_t = 0.0; place_free_flyers()
     if STAGE == "PROLOGUE":
-        t_old = TM_I; TM_I = min(P_NMC, TM_I + dt * (1.0 if t_live < 2.5 else a.prologue_warp)); T_VIS += dt; t_live += dt   # 2.5 s line-up hold (labels)
+        CLK_X = 1.0 if t_live < 2.5 else a.prologue_warp; t_old = TM_I; TM_I = min(P_NMC, TM_I + dt * CLK_X); T_VIS += dt; t_live += dt   # 2.5 s line-up hold (labels)
         TM_D = P_HOLD + (P_BID - P_HOLD) * (TM_I - P_HOLD) / (P_NMC - P_HOLD)   # SC1 holds 1 km out (its prox.csv hold, 3034 -> 4834 s)
         for kk in (1, 2): clock_burns(kk, t_old, TM_I)
         place_free_flyers(); W.sc["docker"] = V2.rel(0, TM_D)
@@ -749,7 +755,7 @@ while True:
         if r == "quit": break
         continue
     if STAGE == "SELECT":
-        # FROZEN: no clock advances. Panel = TOPEX body rates + GO (greyed out until valid).
+        CLK_X = 0.0   # FROZEN: no clock advances. Panel = TOPEX body rates + GO (greyed out until valid).
         if not a.headless:
             sliders.update(wx=0.0, wy=UI_SLIDERS["wy"].val, wz=0.0)
         else:   # script: apply w= / go at the freeze (hold the panel on screen ~2 s of video first)
@@ -781,7 +787,7 @@ while True:
                 except Exception: pass
                 _os.execv(sys.executable, [sys.executable] + sys.argv)
             continue
-        dclk = dt * (END_CLK if te >= E_HALL else 10.0)   # mission time keeps running: x10 (as in DEPART) until the Hall thrusters light
+        CLK_X = END_CLK if te >= E_HALL else 10.0; dclk = dt * CLK_X   # mission time keeps running: x10 (as in DEPART) until the Hall thrusters light
         T_CLOCK += dclk; TM_I += dclk
         if te < E_HALL: END_BO = globals().get("END_BO", 0.0) + A.bo_v * dclk   # docker keeps backing off until its Hall thruster takes over
         taus = {}
@@ -804,7 +810,7 @@ while True:
         dcam = END_D0 + (d_close - END_D0) * wt + (900.0 - d_close) * float(V2.ss(3.5, 7.5, th))
         Rm, Pm, dm = cam_from(Tc, END_AZ0 - 40.0 * uu, END_EL0 + 10.0 * uu, dcam)
         cxe = 640.0; lft = 30.0 + 50.0 * su
-        img, cmask = main_frame(Rm, Pm, dm, 78.0, cxe, 1.0, flashes(dt), col_rects(ucol) + [(640 - 470, WIN_H - 60, 640 + 470, WIN_H - 20), (0, 0, 215, 46)], lift=lft, tails=[END_TAILS[k] for k in CRAFT3], hide_far=False)
+        img, cmask = main_frame(Rm, Pm, dm, 78.0, cxe, 1.0, flashes(dt), col_rects(ucol) + [(640 - 470, WIN_H - 60, 640 + 470, WIN_H - 20), (0, 0, 300, 46)], lift=lft, tails=[END_TAILS[k] for k in CRAFT3], hide_far=False)
         LOOK.F = LOOK_F0 * ZM; LOOK.cy = WIN_H / 2 - lft; hall_plumes(img, Rm, Pm, cxe, taus); LOOK.F = LOOK_F0; LOOK.cy = WIN_H / 2
         canvas = img.copy()
         paste_columns(canvas, END_COL, ucol)
@@ -911,12 +917,12 @@ while True:
             nn_ = max(1, int(dts * 240))
             for _ in range(nn_): filt.predict(dts / nn_)
     W.t += dts; t_demo += dt; t_go += dt; T_VIS += dt
-    if A.arrived: T_CLOCK += dts * (APPROACH_WARP if A.ph == "FINAL APPROACH" else 1.0)   # the one true clock (translation shown x10 on approach)
+    if A.arrived: CLK_X = warp * (APPROACH_WARP if A.ph == "FINAL APPROACH" else 1.0); T_CLOCK += dt * CLK_X   # the one true clock (translation shown x10 on approach)
     dtr = dt * APPROACH_WARP if A.ph == "FINAL APPROACH" else dts   # docker translation step
     # ---- mission clocks: SC1 flies its prox.csv transfer + glideslope to the 30 m hold (x300; the 200 m hold x3000), then the autonomy
     if not A.arrived:
         rate = 3000.0 if 7700.0 < TM_D < 14100.0 else 300.0; t_old_d, t_old_i = TM_D, TM_I
-        TM_D = min(P_H30, TM_D + dt * rate); TM_I += TM_D - t_old_d; T_CLOCK += TM_D - t_old_d
+        CLK_X = rate; TM_D = min(P_H30, TM_D + dt * rate); TM_I += TM_D - t_old_d; T_CLOCK += TM_D - t_old_d
         clock_burns(0, t_old_d, TM_D); [clock_burns(kk, t_old_i, TM_I) for kk in (1, 2)]
         p_new = V2.rel(0, TM_D); W.v_dock = (p_new - V2.rel(0, TM_D - 1.0)); W.sc["docker"] = p_new
         if TM_D >= P_H30 - 1e-6:

@@ -15,6 +15,7 @@ Keys (window mode): Enter/S start, SPACE skip the cutscene, G = GO, P = pause/re
   Hidden test keys: X = inject a tracking loss, L = rotate the sun.
 Headless: --headless --record out.mp4 --script "0:w=0.008,0.661,0.008;0:go;45:light;60:loss" (w=/go are applied at the docker-selection
   freeze; other events at sim seconds after GO; the sim advances fixed dt per frame)."""
+import itertools
 import os as _os; _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import sys, time, json, math, argparse, collections
 import numpy as np, cv2
@@ -179,10 +180,11 @@ def _nozzles(FIRE):
         j = int(np.argmax(np.abs(dv))); out.append((np.eye(3)[j] * -np.sign(dv[j]) * LEV, -np.eye(3)[j] * np.sign(dv[j]), 0.6))
     return [q for r, ex, thr in out for q in _at_corners(r, ex, thr)]
 # Visual nozzle placement (Daniel 2026-11-16 "coming from the corners of the bus"): RCS clusters on the corners of the docker's bus box,
-# measured from cad shell_v (x +-0.168, y -0.305..0.497, z +-0.305 m). Each couple / push above maps to the corners on the same side
+# measured from the bus's own flat faces in cad shell_v (x +-0.168, y +-0.305, z +-0.305 m; the shell bbox runs to y 0.498 only because
+# of the small +y docking-sensor boss, x +-0.075 / z 0.04..0.19, which put the old +y corners 0.19 m out in space). Each couple / push above maps to the corners on the same side
 # of every axis it names (exhaust axis -> the face it leaves from, lever axis -> that side), firing from both ends of the free axis,
 # so a couple stays a couple. Visual only: the torque physics still uses the 0.5 m lever (LEV) above.
-BUS_LO, BUS_HI = np.array([-0.168, -0.305, -0.305]), np.array([0.168, 0.497, 0.305])
+BUS_LO, BUS_HI = np.array([-0.168, -0.305, -0.305]), np.array([0.168, 0.305, 0.305])
 def _at_corners(r, ex, thr):
     ax_ex = int(np.argmax(np.abs(ex))); sides = []
     for j in range(3):
@@ -212,23 +214,39 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas
         if x0c[2] < 0.05 or x1c[2] < 0.05: continue
         a_ = (Kp @ x0c)[:2] / x0c[2]; b_ = (Kp @ x1c)[:2] / x1c[2]
         wend = f_ * math.tan(math.radians(25.0)) * L / x1c[2]   # ~25 deg half-angle: the end disc's projected radius
-        pl.append((a_, b_, max(wend, 2.0 * sc), 1.2 * sc, 0.4 + 0.6 * thr))
+        cw = np.where(r > 0, BUS_HI, BUS_LO); vis = any(float((Rd @ (np.sign(r[j]) * np.eye(3)[j])) @ (pc - (pd + Rd @ cw))) > 0 for j in range(3))
+        pl.append((a_, b_, max(wend, 2.0 * sc), 1.2 * sc, 0.4 + 0.6 * thr, vis))   # vis: the corner sits on a face the camera sees
+    if _os.environ.get("DEMO_PLUME_DEBUG"):
+        img = img.copy()
+        for c in itertools.product(*zip(BUS_LO, BUS_HI)):
+            xc = Rc.T @ (pd + Rd @ np.array(c) - pc)
+            if xc[2] > 0.05: u_ = (Kp @ xc)[:2] / xc[2]; cv2.circle(img, (int(u_[0]), int(u_[1])), 3 * sc, (0, 0, 255), -1)
+        for a_, b_, *_ in pl: cv2.circle(img, (int(a_[0]), int(a_[1])), 2 * sc, (0, 255, 0), -1); cv2.line(img, (int(a_[0]), int(a_[1])), (int(b_[0]), int(b_[1])), (0, 255, 0), 1)
+        return img
     if not pl: return img
     # monoprop hydrazine in vacuum (Daniel 2026-11-16 "more realistic plume"): a faint, wide, pale plume, a small white-hot core at the
     # nozzle, and a smooth exponential fade downstream. Each plume is an analytic intensity field over its own pixel box (no blur pass).
     lo = np.array([W_, H_], float); hi = np.zeros(2)
-    for a_, b_, wend, w0, g in pl: lo = np.minimum(lo, np.minimum(a_, b_) - wend - 3); hi = np.maximum(hi, np.maximum(a_, b_) + wend + 3)
+    for a_, b_, wend, w0, g, _v in pl: lo = np.minimum(lo, np.minimum(a_, b_) - wend - 3); hi = np.maximum(hi, np.maximum(a_, b_) + wend + 3)
     x0, y0 = max(0, int(lo[0])), max(0, int(lo[1])); x1, y1 = min(W_, int(hi[0]) + 1), min(H_, int(hi[1]) + 1)
     if x0 >= x1 or y0 >= y1: return img
-    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32); core = np.zeros(xx.shape, np.float32); halo = np.zeros(xx.shape, np.float32)
-    for a_, b_, wend, w0, g in pl:
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32); core = np.zeros((2,) + xx.shape, np.float32); halo = np.zeros((2,) + xx.shape, np.float32)
+    for a_, b_, wend, w0, g, vis in pl:
+        k_ = 0 if vis else 1
         dv_ = b_ - a_; ln = float(np.hypot(*dv_)); d_ = dv_ / ln if ln > 1e-6 else np.zeros(2)
         px, py = xx - a_[0], yy - a_[1]; t = np.clip(px * d_[0] + py * d_[1], 0.0, ln)
         s2 = (px - d_[0] * t) ** 2 + (py - d_[1] * t) ** 2
         u = np.maximum(t / max(ln, 1e-6), 1.0 - ln / wend) if ln < wend else t / ln
         w = w0 + (wend - w0) * np.clip(u, 0, 1); le = max(ln, wend)
-        halo += g * np.exp(-2.2 * t / le - s2 / (w * w))
-        core += g * np.exp(-9.0 * t / le - s2 / (0.30 * w + 0.8 * sc) ** 2)
+        halo[k_] += g * np.exp(-2.2 * t / le - s2 / (w * w))
+        core[k_] += g * np.exp(-9.0 * t / le - s2 / (0.30 * w + 0.8 * sc) ** 2)
+    if any(not q[5] for q in pl):   # plumes from far-side corners start behind the bus: hide them inside its silhouette
+        cs = [Rc.T @ (pd + Rd @ np.array(c) - pc) for c in itertools.product(*zip(BUS_LO, BUS_HI))]
+        bm = np.zeros(xx.shape, np.uint8)
+        if min(c[2] for c in cs) > 0.05:
+            hull = cv2.convexHull(np.array([(Kp @ c)[:2] / c[2] - (x0, y0) for c in cs], np.float32)).astype(np.int32); cv2.fillConvexPoly(bm, hull, 1)
+        halo[1] *= 1.0 - bm; core[1] *= 1.0 - bm
+    halo, core = halo.sum(0), core.sum(0)
     over = halo[..., None] * np.array([150.0, 120.0, 95.0], np.float32) + core[..., None] * np.array([255.0, 245.0, 235.0], np.float32)   # BGR: pale blue halo, white core
     out = img.copy(); out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + over, 0, 255).astype(np.uint8)
     return out

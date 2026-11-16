@@ -120,9 +120,13 @@ class Look:
             if vis < 0.01 or cz[0] <= 0: continue
             rp = self.F * Rr / cz[0]; th = np.linspace(0, 2 * np.pi, 361); ring = np.c_[cxy[0, 0] + rp * np.cos(th), cxy[0, 1] + rp * np.sin(th)]
             if dash:
-                seg = int(max(2, rp * 2 * np.pi / (7 * self.lw * 1.0) ))
+                seg = int(max(2, rp * 2 * np.pi / (7 * self.lw * 1.0) )); Hh, Ww = img.shape[:2]; pd = max(1, int(round(self.lw))) + 4; cb = bgr(col)
                 for j in range(0, seg, 2):
-                    a_, b_ = int(j * 360 / seg), int((j + 1) * 360 / seg) + 1; self._blend_poly(img, ring[a_:b_], bgr(col), vis, self.lw)
+                    a_, b_ = int(j * 360 / seg), int((j + 1) * 360 / seg) + 1; rs = ring[a_:b_]
+                    if len(rs) < 2: continue
+                    mn = rs.min(0); mx = rs.max(0)   # dash wholly off the canvas (outside the stroke+AA pad): _blend_roi would draw nothing
+                    if mx[0] < -pd or mx[1] < -pd or mn[0] > Ww + pd or mn[1] > Hh + pd: continue
+                    self._blend_poly(img, rs, cb, vis, self.lw)
             else: self._blend_poly(img, ring, bgr(col), vis, self.lw)
         # trails (last 6800 s of each craft), glow + line, alpha ramps up toward the craft
         for k in (range(3) if trail_end_alpha > 0 else ()):
@@ -132,11 +136,14 @@ class Look:
             far = np.linalg.norm(Pk, axis=1) > (8.5e3 if hide_far else 1e9); xy, z = self.project(R, P, Pk, cx); xy[far | (z <= 0)] = np.nan
             al = np.linspace(0, 1, len(xy)) ** 1.6 * trail_end_alpha
             if k > 0: al = al * (0.3 + 0.7 * ss(60, 160, d))
+            Hh, Ww = img.shape[:2]; pd = max(1, int(round(5 * self.lw))) + 4; cb = bgr(col)
             for j0 in range(0, len(xy) - 1, 20):   # piecewise alpha (21-point pieces)
                 seg = xy[j0:j0 + 21]; okk = np.isfinite(seg).all(1)
                 if okk.sum() < 2: continue
+                sv = seg[okk]; mn = sv.min(0); mx = sv.max(0)   # piece wholly off the canvas (outside the glow stroke+AA pad): nothing to draw
+                if mx[0] < -pd or mx[1] < -pd or mn[0] > Ww + pd or mn[1] > Hh + pd: continue
                 aa = float(al[min(j0 + 10, len(al) - 1)])
-                self._blend_poly(img, seg[okk], bgr(col), 0.10 * aa, 5 * self.lw); self._blend_poly(img, seg[okk], bgr(col), 0.85 * aa, 1.6 * self.lw)
+                self._blend_poly(img, sv, cb, 0.10 * aa, 5 * self.lw); self._blend_poly(img, sv, cb, 0.85 * aa, 1.6 * self.lw)
         # dots when small
         pxs = self.F * 10.0 / max(cz[0], 1e-6); self._dot(img, cxy[0], bgr(C_TGT), float(np.clip((14 - pxs) / 8, 0, 1)), 22)
         for k in range(3):

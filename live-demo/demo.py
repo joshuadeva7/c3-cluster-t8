@@ -678,7 +678,8 @@ def trace_push(est_ok, w_est, R_est):
     for k in CAMS:
         wc, Rcr = (W.w_dock, W.R_sc["docker"]) if k == "docker" else (np.zeros(3), W.R_sc[k])
         tru = np.degrees(mekf.relative_rate_body(W.w, W.R_IB, wc, Rcr))
-        est = np.degrees(mekf.relative_rate_body(w_est, R_est, wc, Rcr)) if est_ok else np.full(3, np.nan)
+        # a dark camera measures nothing (Daniel 2026-11-16): no new estimate points on its graph until the IR switchover brings data back
+        est = np.degrees(mekf.relative_rate_body(w_est, R_est, wc, Rcr)) if est_ok and ir_state(k) != "dark" else np.full(3, np.nan)
         TR[k].append((t_demo, *est, *tru))
         while TR[k] and t_demo - TR[k][0][0] > 30.0: TR[k].popleft()
 def dashed(img, pts, col):
@@ -716,7 +717,7 @@ def tile_frame(tile, acc):
 def cam_tile(i, k, gray, Rc, pc, Kc, est_ok, R_est, p_est):
     gt = gray if k != "docker" else auto_expose(gray, 150)
     tile = cv2.cvtColor(cv2.resize(gt, (TILE * S, TILE * S), interpolation=cv2.INTER_AREA), cv2.COLOR_GRAY2BGR)
-    if est_ok and not (k == "docker" and Kc is Kn):
+    if est_ok and not (k == "docker" and Kc is Kn) and ir_state(k) != "dark":   # camera off: no state overlay on its (black) view
         draw_axes_overlay(tile, Rc.T @ W.R_IB, Rc.T @ (np.zeros(3) - pc), (120, 120, 120), TILE * S / RES, Kc)
         draw_axes_overlay(tile, Rc.T @ R_est, Rc.T @ (p_est - pc), None, TILE * S / RES, Kc)
     acc = tuple(int(c * 255) for c in ACC[k][::-1])

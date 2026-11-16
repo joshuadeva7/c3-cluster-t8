@@ -5,9 +5,9 @@ via the depth buffer, solve PnP (RANSAC + LM). Output: measured (R, t) body->cam
 import numpy as np, cv2
 
 def roi_from_mask(mask, pad=0.15, min_side=24):
-    ys, xs = np.nonzero(mask)
-    if len(xs) == 0: return None
-    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    bx, by, bw, bh = cv2.boundingRect(mask.view(np.uint8) if mask.dtype == bool else mask)   # = min/max of the nonzero pixels, ~10x cheaper
+    if bw == 0: return None
+    x0, x1, y0, y1 = np.int64(bx), np.int64(bx + bw - 1), np.int64(by), np.int64(by + bh - 1)
     c = np.array([(x0 + x1) / 2, (y0 + y1) / 2]); s = max(x1 - x0, y1 - y0, min_side) * (1 + 2 * pad)
     return c, s
 
@@ -25,8 +25,12 @@ class Tracker:
     def prepare(self, live_gray_list, priors, suns=None):
         """render refs + crops for a batch of cameras; returns per-camera dicts and the image list to extract."""
         jobs, ims = [], []
+        if hasattr(self.r, "submit"):   # issue every reference render first, then read them back (one GPU wait, not one per camera)
+            fs = [self.r.submit(R0, t0, sun_cam=None if suns is None else suns[k], slot=k + 1) for k, (R0, t0) in enumerate(priors)]
+        else: fs = None
         for k, (g, (R0, t0)) in enumerate(zip(live_gray_list, priors)):
-            col, dep = self.r.render(R0, t0) if suns is None else self.r.render(R0, t0, sun_cam=suns[k])
+            if fs is not None: col, dep = fs[k]()
+            else: col, dep = self.r.render(R0, t0) if suns is None else self.r.render(R0, t0, sun_cam=suns[k])
             roi = roi_from_mask(dep > 0)
             if roi is None: jobs.append(None); continue
             c, s = roi

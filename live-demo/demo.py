@@ -154,6 +154,9 @@ class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by th
     def render(self, Rm, t, sun_cam=None):   # (Rm, t) = TOPEX body -> camera
         s = sun_cam if sun_cam is not None else np.array([-0.5, -0.3, -0.8])
         return self.scene.render(K, RES, RES, Rm.T, -Rm.T @ t, Rm.T @ s, znear=0.3, zfar=2000)
+    def submit(self, Rm, t, sun_cam=None, slot=0):   # = render(), split: draw now, fetch() later
+        s = sun_cam if sun_cam is not None else np.array([-0.5, -0.3, -0.8])
+        return self.scene.submit(K, RES, RES, Rm.T, -Rm.T @ t, Rm.T @ s, znear=0.3, zfar=2000, slot=slot)
 ref = RefRenderer()
 Kn = R_.K_for(RES, 62.0)     # docker near-field camera (range < 11 m): wide FOV, close near plane, illuminator on
 ARMRES = 240 * S; Ka = R_.K_for(ARMRES, 88.0)   # the arm cam fills a misc square: rendered at that square's real pixel size
@@ -250,11 +253,13 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas
     over = halo[..., None] * np.array([150.0, 120.0, 95.0], np.float32) + core[..., None] * np.array([255.0, 245.0, 235.0], np.float32)   # BGR: pale blue halo, white core
     out = img.copy(); out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + over, 0, 255).astype(np.uint8)
     return out
-def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0, hq=False):
+def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0, hq=False, slot=None):
+    """slot=None: render now -> (col, depth). slot=k: submit to target k and return fetch() (call it later for the same result)."""
     for k, n in n_sc.items(): world.set_visible(n, k != own and k not in hide)   # a camera never sees its own bus
     world.set_visible(n_arm, own != "docker")
     Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else (CHRES if Kc is Kch else (TILE * S if Kc is Kest else RES))
     ww, hh = wh if wh is not None else (n_, n_)
+    if slot is not None: return world.submit(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head, depth=depth, msaa=msaa, hq=hq, slot=slot)
     return world.render(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head, depth=depth, msaa=msaa, hq=hq)
 def auto_expose(g, target=200.0):   # display auto-exposure: 97th percentile of lit pixels -> target
     m = g > 6
@@ -521,8 +526,9 @@ def cam_block():
             else: IR["fresh"] = False
             col = IR["img"]
         else:
-            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False)
+            col = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False, slot=1 + len(live))   # fetched below
         live.append(col); Rcs.append(Rc); pcs.append(pc)
+    live = [c()[0] if callable(c) else c for c in live]   # all three cameras were submitted back to back; read them back now
     grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
     return live, Rcs, pcs, Kcs, grays
 import concurrent.futures as _cf
@@ -570,7 +576,9 @@ def pause_loop(canvas, main_w):
 _FT = []
 def _fps_report():
     if len(_FT) > 30:
-        dt_ = np.diff(np.array(_FT[10:])); print(f"[fps] frames={len(_FT)} median={1.0 / np.median(dt_):.2f} mean={len(dt_) / dt_.sum():.2f} p10={1.0 / np.percentile(dt_, 90):.2f}", file=sys.stderr, flush=True)
+        dt_ = np.diff(np.array(_FT[10:]))
+        if _os.environ.get("DEMO_FT_DUMP"): np.save(_os.environ["DEMO_FT_DUMP"], np.array(_FT))   # per-frame timestamps (benchmark analysis)
+        print(f"[fps] frames={len(_FT)} median={1.0 / np.median(dt_):.2f} mean={len(dt_) / dt_.sum():.2f} p10={1.0 / np.percentile(dt_, 90):.2f}", file=sys.stderr, flush=True)
 import atexit; atexit.register(_fps_report)
 def emit(canvas, main_w, allow_pause=True):
     """write / show one frame; returns 'quit' or the list of keys."""

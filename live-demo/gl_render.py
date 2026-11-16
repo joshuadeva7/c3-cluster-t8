@@ -62,6 +62,9 @@ class GLScene:
         self.objs[i]["box"] = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
     def set_pose(self, i, T): self.objs[i]["pose"] = np.array(T, float)
     def set_visible(self, i, vis): self.objs[i]["visible"] = bool(vis)
+    def _fbo_new(self, w, h):
+        col = self.ctx.renderbuffer((w, h), 4); d = self.ctx.depth_texture((w, h))
+        return self.ctx.framebuffer(color_attachments=[col], depth_attachment=d)
     def _fbo_ms(self, w, h, samples):
         k = ("ms", w, h, samples)
         if k not in self.fbos:   # multisampled colour + depth, resolved into a plain RGBA8 target (alpha = pixel coverage)
@@ -70,7 +73,8 @@ class GLScene:
             rs = self.ctx.framebuffer(color_attachments=[self.ctx.renderbuffer((w, h), 4)])
             self.fbos[k] = (ms, rs)
         return self.fbos[k]
-    def _fbo(self, w, h):
+    def _fbo(self, w, h, slot=0):   # slot > 0: a separate target, so several submitted renders can be fetched later
+        if slot: k = (w, h, slot); self.fbos[k] = self.fbos.get(k) or self._fbo_new(w, h); return self.fbos[k]
         if (w, h) not in self.fbos:
             # colour RGBA8 + 32-bit float depth TEXTURE; metric depth is recovered from the standard depth buffer
             # (no float colour attachment / MRT: those read back as zeros on some drivers, e.g. Apple's GL-on-Metal)
@@ -92,7 +96,7 @@ class GLScene:
         y0 = int(max(0, min(H, np.floor(y0) - 3))); y1 = int(max(0, min(H, np.ceil(y1) + 4)))
         return (x0, y0, x1, y1)
     def render(self, *a, **k): return self.submit(*a, **k)()
-    def submit(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0, hq=False):
+    def submit(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0, hq=False, slot=0):
         """issue the draw calls now (the GPU runs them asynchronously) and return fetch(): the readback, = render()'s result.
         Calling fetch() later lets CPU work overlap the GPU frame instead of stalling on it. Nothing else may use this
         renderer's framebuffers between submit() and fetch()."""
@@ -105,7 +109,7 @@ class GLScene:
         if msaa: P[1] = [0, 2 * K[1, 1] / H, 2 * K[1, 2] / H - 1, 0]   # display views: image row 0 -> GL row 0, readback already top-down (no flip copy)
         V = np.eye(4); V[:3, :3] = R_IC.T; V[:3, 3] = -R_IC.T @ p_IC
         if msaa: fms, frs = self._fbo_ms(W, H, msaa); fbo = fms
-        else: fbo = self._fbo(W, H)
+        else: fbo = self._fbo(W, H, slot)
         fbo.use(); fbo.clear(0, 0, 0, 0)
         self.ctx.enable(moderngl.DEPTH_TEST); self.ctx.disable(moderngl.CULL_FACE); self.ctx.front_face = "cw" if msaa else "ccw"   # y flipped -> winding flipped
         s = np.asarray(sun_w, float); s = s / np.linalg.norm(s)
@@ -122,7 +126,7 @@ class GLScene:
         r = None
         if msaa:
             self.ctx.copy_framebuffer(frs, fms); r = self._screen_rect(K, W, H, V, n)   # (poses as drawn) only this rect can be non-zero
-            if _glFlush is not None: _glFlush()   # start the GPU on it now, so a deferred fetch() overlaps CPU work
+        if _glFlush is not None: _glFlush()   # start the GPU on it now, so a deferred fetch() overlaps CPU work
         return lambda: self._fetch(fbo, frs if msaa else None, W, H, n, f, depth, msaa, r)
     def _fetch(self, fbo, frs, W, H, n, f, depth, msaa, r):
         if msaa:   # returns (RGB premultiplied, coverage alpha uint8 0..255); reads back only rect r (outside it alpha and rgb are 0)

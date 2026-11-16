@@ -26,6 +26,15 @@ void main(){ vec3 n = normalize(n_w); if (!gl_FrontFacing) n = -n;
   float h = max(dot(n, L), 0.0) * cone / (1.0 + (d / hd0) * (d / hd0));
   vec3 col = c*(amb + kd*l + kh*h); f_col = vec4(pow(clamp(col,0.0,1.0), vec3(1.0/2.2)), 1.0); }"""
 
+def _find_glflush():   # glFlush without PyOpenGL (the Mac venv has none): straight from the system GL library
+    import ctypes, ctypes.util, sys
+    names = ["/System/Library/Frameworks/OpenGL.framework/OpenGL"] if sys.platform == "darwin" else [ctypes.util.find_library("GL"), "libGL.so.1", "libOpenGL.so.0"]
+    for nm in names:
+        try:
+            if nm: return ctypes.CDLL(nm).glFlush
+        except Exception: pass
+    return None
+_glFlush = _find_glflush()
 def make_context(standalone=True):
     if not standalone: return moderngl.create_context()
     if sys.platform.startswith("linux"): return moderngl.create_standalone_context(backend="egl")
@@ -82,7 +91,11 @@ class GLScene:
         x0 = int(max(0, min(W, np.floor(x0) - 3))); x1 = int(max(0, min(W, np.ceil(x1) + 4)))
         y0 = int(max(0, min(H, np.floor(y0) - 3))); y1 = int(max(0, min(H, np.ceil(y1) + 4)))
         return (x0, y0, x1, y1)
-    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0, hq=False):
+    def render(self, *a, **k): return self.submit(*a, **k)()
+    def submit(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0, hq=False):
+        """issue the draw calls now (the GPU runs them asynchronously) and return fetch(): the readback, = render()'s result.
+        Calling fetch() later lets CPU work overlap the GPU frame instead of stalling on it. Nothing else may use this
+        renderer's framebuffers between submit() and fetch()."""
         """depth=True: (RGB, metric depth). depth=False: (RGB, None). msaa=N (display views only): N-sample anti-aliased edges,
         returns (RGB premultiplied over black, coverage alpha uint8 0..255) -- composite as img*(1-a/255) + rgb."""
         n, f = znear, zfar
@@ -106,9 +119,13 @@ class GLScene:
             Mn = np.linalg.inv(M[:3, :3]).T; pr["Mn"].write(Mn.T.astype("f4").tobytes())
             (o.get("vao_hq", o["vao"]) if hq else o["vao"]).render(moderngl.TRIANGLES)
         self.ctx.front_face = "ccw"
-        if msaa:   # returns (RGB premultiplied, coverage alpha uint8 0..255)
-            self.ctx.copy_framebuffer(frs, fms)
-            r = self._screen_rect(K, W, H, V, n)   # read back only the rect the models can cover (outside it alpha is 0 and rgb is 0)
+        r = None
+        if msaa:
+            self.ctx.copy_framebuffer(frs, fms); r = self._screen_rect(K, W, H, V, n)   # (poses as drawn) only this rect can be non-zero
+            if _glFlush is not None: _glFlush()   # start the GPU on it now, so a deferred fetch() overlaps CPU work
+        return lambda: self._fetch(fbo, frs if msaa else None, W, H, n, f, depth, msaa, r)
+    def _fetch(self, fbo, frs, W, H, n, f, depth, msaa, r):
+        if msaa:   # returns (RGB premultiplied, coverage alpha uint8 0..255); reads back only rect r (outside it alpha and rgb are 0)
             if r is None:
                 rgba = np.empty((H, W, 4), np.uint8); frs.read_into(rgba, components=4, attachment=0)
                 return cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), np.ascontiguousarray(rgba[:, :, 3])
@@ -119,6 +136,7 @@ class GLScene:
             return rgb, al
         col = np.empty((H, W, 3), np.uint8); fbo.read_into(col, components=3, attachment=0); col = cv2.flip(col, 0)
         if not depth: return col, None
-        d = np.empty((H, W), np.float32); fbo.read_into(d, components=1, attachment=-1, dtype="f4"); d = cv2.flip(d, 0).astype(np.float64)
-        zn = 2.0 * d - 1.0; z = (2.0 * f * n) / ((f + n) - zn * (f - n)); z[d >= 1.0 - 1e-7] = 0.0
+        d = np.empty((H, W), np.float32); fbo.read_into(d, components=1, attachment=-1, dtype="f4"); d = d[::-1].astype(np.float64)
+        # z = 2fn / ((f+n) - (2d-1)(f-n)), the same float64 operations in the same order, done in place (bit-identical, fewer passes)
+        z = d * 2.0; z -= 1.0; z *= (f - n); np.subtract(f + n, z, out=z); np.divide(2.0 * f * n, z, out=z); z[d >= 1.0 - 1e-7] = 0.0
         return col, z.astype(np.float32)

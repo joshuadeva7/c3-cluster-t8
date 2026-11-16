@@ -299,8 +299,6 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     LOOK.F = LOOK_F0 * width / WIN_W * zoom; LOOK.cy = (WIN_H / 2 - lift) * S   # lift: picture centre raised (keeps the bottom error line clear)
     width, cx = width * S, cx * S   # layout units -> canvas pixels
     C = lvlh_C(T_VIS); V2.STARS = V2.H5["STARS_ECI"] @ C.T
-    img = LOOK.background(Rc, Pc, cx, width)
-    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far, trail_end_alpha=TRAIL_A)
     sel = roles_s > 0.5
     for k, (n0, n1) in m_sc.items():
         mainsc.set_visible(n0, not sel); mainsc.set_visible(n1, sel); T_ = T44(W.R_sc[k], W.sc[k])
@@ -309,8 +307,11 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     mainsc.set_visible(m_arm[0], not sel); mainsc.set_visible(m_arm[1], sel); mainsc.set_pose(m_arm[0], Ta); mainsc.set_pose(m_arm[1], Ta)
     mainsc.set_pose(m_top, T44(W.R_IB, np.zeros(3)))
     zn = float(np.clip(d * 0.01, 0.05, 5.0))
+    fetch = mainsc.submit(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True, msaa=MSAA) if MSAA else None   # GPU draws the models while the CPU paints background + overlays
+    img = LOOK.background(Rc, Pc, cx, width)
+    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far, trail_end_alpha=TRAIL_A)
     if MSAA:   # anti-aliased model edges: blend by pixel coverage (alpha); fully covered pixels are exactly the model colour
-        col, al = mainsc.render(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True, msaa=MSAA)
+        col, al = fetch()
         m = al > 0; bx, by, bw, bh = cv2.boundingRect(al)   # only the box the models cover
         if bw:
             sl = (slice(by, by + bh), slice(bx, bx + bw)); inv = cv2.cvtColor(255 - al[sl], cv2.COLOR_GRAY2BGR)
@@ -513,7 +514,7 @@ def cam_block():
             if W.t - IR["last"] >= 1.0 / IR_HZ - 1e-9 or IR["img"] is None:
                 for kk, n in n_sc.items(): world.set_visible(n, kk != k)
                 world.set_visible(n_arm, True)
-                c_, _ = world.render(K, RES, RES, Rc, pc, Rc @ np.array([0.0, 0.0, -1.0]), znear=0.3, zfar=2000)
+                c_, _ = world.render(K, RES, RES, Rc, pc, Rc @ np.array([0.0, 0.0, -1.0]), znear=0.3, zfar=2000, depth=False)   # colour only: the depth was read back and discarded
                 lo = max(8, int(RES * IR_SCALE)); c_ = cv2.resize(cv2.resize(c_, (lo, lo), interpolation=cv2.INTER_AREA), (RES, RES), interpolation=cv2.INTER_LINEAR)
                 c_ = cv2.GaussianBlur(c_, (0, 0), 1.2).astype(np.float32) * 0.85 + 18 + rng.normal(0, 4.0, c_.shape)
                 IR["img"] = np.clip(c_, 0, 255).astype(np.uint8); IR["last"] = W.t; IR["fresh"] = True

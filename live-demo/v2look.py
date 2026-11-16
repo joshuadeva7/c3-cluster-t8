@@ -156,7 +156,23 @@ class Look:
                 _blend_roi(img, q, rr + 3 + th_, (1 - u) * 0.9, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]) // 16, int(q_[0, 1]) // 16), rr, cb_, th_, cv2.LINE_AA))
         return img
     def vignette(self, img, x0=0):   # img * vig in 8-bit fixed point (within 1/255 of the float product; ~3x faster, no float frame)
-        w = img.shape[1]; return cv2.multiply(img, self.vig8[:, x0:x0 + w], scale=1.0 / 255.0)
+        """Where vig8 == 255 the product is exactly the input (x*255/255 rounds to x), so those pixels are copied, not multiplied:
+        the frame is cut into row bands and each band's all-255 column span is a plain copy. Pixel-identical to one full multiply."""
+        h, w = img.shape[:2]; key = (x0, w, h); self._vb = getattr(self, "_vb", {})
+        if key not in self._vb:
+            v = self.vig8[:h, x0:x0 + w, 0] == 255; bands = []; nb = 24; e = np.linspace(0, h, nb + 1).astype(int)
+            for r0, r1 in zip(e[:-1], e[1:]):
+                full = v[r0:r1].all(0); idx = np.nonzero(full)[0]
+                if len(idx) and idx[-1] - idx[0] + 1 == len(idx): bands.append((r0, r1, int(idx[0]), int(idx[-1]) + 1))
+                else: bands.append((r0, r1, 0, 0))
+            self._vb[key] = bands
+        out = np.empty_like(img); vg = self.vig8[:, x0:x0 + w]; sc = 1.0 / 255.0
+        for r0, r1, a, b in self._vb[key]:
+            if b <= a: cv2.multiply(img[r0:r1], vg[r0:r1], dst=out[r0:r1], scale=sc); continue
+            if a > 0: cv2.multiply(img[r0:r1, :a], vg[r0:r1, :a], dst=out[r0:r1, :a], scale=sc)
+            out[r0:r1, a:b] = img[r0:r1, a:b]
+            if b < w: cv2.multiply(img[r0:r1, b:], vg[r0:r1, b:], dst=out[r0:r1, b:], scale=sc)
+        return out
 
 def role_col(k, s):
     tgt = C_DOCK if k == 0 else C_IMG; return C_NEU * (1 - s) + tgt * s

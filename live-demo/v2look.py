@@ -125,7 +125,7 @@ class Look:
                     a_, b_ = int(j * 360 / seg), int((j + 1) * 360 / seg) + 1; self._blend_poly(img, ring[a_:b_], bgr(col), vis, self.lw)
             else: self._blend_poly(img, ring, bgr(col), vis, self.lw)
         # trails (last 6800 s of each craft), glow + line, alpha ramps up toward the craft
-        for k in range(3):
+        for k in (range(3) if trail_end_alpha > 0 else ()):
             col = role_col(k, roles_s); t1 = t_k[k]; ts = np.linspace(max(0.0, t1 - 6800.0), t1, 420)   # v2: trails start at TOPEX arrival
             Pk = relv(k, ts)
             if tails is not None and len(tails[k]) > 1: Pk = np.vstack([Pk, np.asarray(tails[k])])   # the live departure, appended to the prox.csv trail

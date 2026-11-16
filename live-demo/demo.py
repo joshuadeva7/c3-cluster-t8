@@ -175,8 +175,28 @@ def _nozzles(FIRE):
             r = sgn * LEV * a1; F = sgn * np.sign(u) * a2
             out.append((r, -F, abs(u)))
     dv = FIRE["dv"]; dn = np.linalg.norm(dv)
-    if dn > 1e-7:
-        out.append((-0.6 * dv / dn, -dv / dn, 1.0)); out.append((-0.6 * dv / dn + 0.15 * np.cross(dv / dn, [0, 0, 1.0 if abs(dv[2]) < 0.9 * dn else 0]), -dv / dn, 0.8))
+    if dn > 1e-7:   # translation: the quad on the bus face opposite the push (dominant axis), exhausting straight out of that face
+        j = int(np.argmax(np.abs(dv))); out.append((np.eye(3)[j] * -np.sign(dv[j]) * LEV, -np.eye(3)[j] * np.sign(dv[j]), 0.6))
+    return [q for r, ex, thr in out for q in _at_corners(r, ex, thr)]
+# Visual nozzle placement (Daniel 2026-11-16 "coming from the corners of the bus"): RCS clusters on the corners of the docker's bus box,
+# measured from cad shell_v (x +-0.168, y -0.305..0.497, z +-0.305 m). Each couple / push above maps to the corners on the same side
+# of every axis it names (exhaust axis -> the face it leaves from, lever axis -> that side), firing from both ends of the free axis,
+# so a couple stays a couple. Visual only: the torque physics still uses the 0.5 m lever (LEV) above.
+BUS_LO, BUS_HI = np.array([-0.168, -0.305, -0.305]), np.array([0.168, 0.497, 0.305])
+def _at_corners(r, ex, thr):
+    ax_ex = int(np.argmax(np.abs(ex))); sides = []
+    for j in range(3):
+        if j == ax_ex: sides.append([np.sign(ex[j])])
+        elif abs(r[j]) > 1e-9: sides.append([np.sign(r[j])])
+        else: sides.append([-1.0, 1.0])
+    out = []
+    for sx in sides[0]:
+        for sy in sides[1]:
+            for sz in sides[2]:
+                s_ = np.array([sx, sy, sz]); c = np.where(s_ > 0, BUS_HI, BUS_LO)
+                e = np.zeros(3); e[ax_ex] = np.sign(ex[ax_ex])
+                if ax_ex == 2: e = e + np.array([0.0, 0.85 * s_[1], 0.0]); e /= np.linalg.norm(e)   # the arrays run along z: cant 40 deg off them
+                out.append((c + 0.02 * e, e, thr))
     return out
 def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas pixels per layout unit
     Kp = Kch if Kp is None else Kp
@@ -185,31 +205,31 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas
         if x[2] < 0.05: return None
         u = Kp @ x; return (float(u[0] / u[2]), float(u[1] / u[2]))
     rng_ = np.random.default_rng(frame)
-    ops = []; xs_ = []; ys_ = []   # draw list + its pixel extent: only that box (plus blur reach) is ever touched
-    for r, ex, thr in _nozzles(FIRE):   # short flaring exhaust cone per firing nozzle (BGR, like the canvas)
-        p0 = pd + Rd @ r; L = (0.35 + 0.65 * thr) * (0.8 + 0.4 * rng_.random())
-        a = proj(p0); b = proj(p0 + Rd @ ex * L)
-        if a is None or b is None: continue
-        a = np.array(a); b = np.array(b); dvec = b - a; ln = np.linalg.norm(dvec)
-        if ln < 1.0 * sc:
-            c_ = tuple(int(v) for v in a); ops.append(("c", c_, 5 * sc, tuple(255.0 * thr for _ in range(3))))
-            xs_ += [c_[0] - 5 * sc, c_[0] + 5 * sc]; ys_ += [c_[1] - 5 * sc, c_[1] + 5 * sc]; continue
-        nrm = np.array([-dvec[1], dvec[0]]) / ln
-        for frac, wmul, col in ((1.0, 0.45, (30, 110, 255)), (0.75, 0.28, (90, 180, 255)), (0.45, 0.12, (225, 245, 255))):   # orange glow -> white-hot core (BGR)
-            e = a + dvec * frac; w0 = 1.5 * sc; w1 = max(2.5 * sc, wmul * ln)
-            poly = np.array([a + nrm * w0, e + nrm * w1, e - nrm * w1, a - nrm * w0], np.int32)
-            ops.append(("p", poly, tuple(c * (0.35 + 0.65 * thr) for c in col))); xs_ += [int(poly[:, 0].min()), int(poly[:, 0].max())]; ys_ += [int(poly[:, 1].min()), int(poly[:, 1].max())]
-        c_ = tuple(int(v) for v in a); ops.append(("c", c_, 3 * sc, (255, 255, 255))); xs_ += [c_[0] - 3 * sc, c_[0] + 3 * sc]; ys_ += [c_[1] - 3 * sc, c_[1] + 3 * sc]
-    if not ops: return img
-    H_, W_ = img.shape[:2]; pad = int(2 * math.ceil(4 * 3.0 * sc)) + 4   # 2x the wide blur's reach: the cropped blur equals the full-frame one
-    x0, x1 = max(0, min(xs_) - pad), min(W_, max(xs_) + pad + 1); y0, y1 = max(0, min(ys_) - pad), min(H_, max(ys_) + pad + 1)
+    H_, W_ = img.shape[:2]; f_ = float(Kp[0, 0]); pl = []
+    for r, ex, thr in _nozzles(FIRE):   # one plume per firing nozzle
+        p0 = pd + Rd @ r; L = (0.5 + 0.7 * thr) * (0.9 + 0.2 * rng_.random()); exw = Rd @ ex
+        x0c, x1c = Rc.T @ (p0 - pc), Rc.T @ (p0 + exw * L - pc)
+        if x0c[2] < 0.05 or x1c[2] < 0.05: continue
+        a_ = (Kp @ x0c)[:2] / x0c[2]; b_ = (Kp @ x1c)[:2] / x1c[2]
+        wend = f_ * math.tan(math.radians(25.0)) * L / x1c[2]   # ~25 deg half-angle: the end disc's projected radius
+        pl.append((a_, b_, max(wend, 2.0 * sc), 1.2 * sc, 0.4 + 0.6 * thr))
+    if not pl: return img
+    # monoprop hydrazine in vacuum (Daniel 2026-11-16 "more realistic plume"): a faint, wide, pale plume, a small white-hot core at the
+    # nozzle, and a smooth exponential fade downstream. Each plume is an analytic intensity field over its own pixel box (no blur pass).
+    lo = np.array([W_, H_], float); hi = np.zeros(2)
+    for a_, b_, wend, w0, g in pl: lo = np.minimum(lo, np.minimum(a_, b_) - wend - 3); hi = np.maximum(hi, np.maximum(a_, b_) + wend + 3)
+    x0, y0 = max(0, int(lo[0])), max(0, int(lo[1])); x1, y1 = min(W_, int(hi[0]) + 1), min(H_, int(hi[1]) + 1)
     if x0 >= x1 or y0 >= y1: return img
-    over = np.zeros((y1 - y0, x1 - x0, img.shape[2]), np.float32)
-    for op in ops:
-        if op[0] == "c": cv2.circle(over, (op[1][0] - x0, op[1][1] - y0), op[2], op[3], -1, cv2.LINE_AA)
-        else: cv2.fillPoly(over, [op[1] - np.array([x0, y0], np.int32)], op[2], cv2.LINE_AA)
-    if not over.any(): return img   # nothing landed on screen: identical result
-    over = cv2.GaussianBlur(over, (0, 0), 3.0 * sc) * 1.3 + cv2.GaussianBlur(over, (0, 0), 0.8 * sc) * 0.5
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32); core = np.zeros(xx.shape, np.float32); halo = np.zeros(xx.shape, np.float32)
+    for a_, b_, wend, w0, g in pl:
+        dv_ = b_ - a_; ln = float(np.hypot(*dv_)); d_ = dv_ / ln if ln > 1e-6 else np.zeros(2)
+        px, py = xx - a_[0], yy - a_[1]; t = np.clip(px * d_[0] + py * d_[1], 0.0, ln)
+        s2 = (px - d_[0] * t) ** 2 + (py - d_[1] * t) ** 2
+        u = np.maximum(t / max(ln, 1e-6), 1.0 - ln / wend) if ln < wend else t / ln
+        w = w0 + (wend - w0) * np.clip(u, 0, 1); le = max(ln, wend)
+        halo += g * np.exp(-2.2 * t / le - s2 / (w * w))
+        core += g * np.exp(-9.0 * t / le - s2 / (0.30 * w + 0.8 * sc) ** 2)
+    over = halo[..., None] * np.array([150.0, 120.0, 95.0], np.float32) + core[..., None] * np.array([255.0, 245.0, 235.0], np.float32)   # BGR: pale blue halo, white core
     out = img.copy(); out[y0:y1, x0:x1] = np.clip(img[y0:y1, x0:x1].astype(np.float32) + over, 0, 255).astype(np.uint8)
     return out
 def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0, hq=False):
@@ -253,6 +273,7 @@ m_arm = (mainsc.add(v2_sc_mesh(V2.C_NEU, ("arm_ext", "arm_end"))), mainsc.add(v2
 def lvlh_C(t):   # LVLH attitude (ECI -> LVLH) on the cutscene's visual clock, continued from its last frame
     return np.array([np.interp(t, V2.H5["CV_T"], V2.H5["CV"][:, i, j]) for i in range(3) for j in range(3)]).reshape(3, 3)
 CRAFT3 = ("docker", "imagerA", "imagerB")
+TRAIL_A = 1.0   # trail opacity: 1 until the ending, where the trails fade out as the craft fly away (Daniel 2026-11-16)
 def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=True, want_mask=False, lift=0.0, zoom=1.0):
     """the main view: v2 background + vector layers, then the GL models (v2 shading) on top, then the vignette.
     The focal length scales with the pane width, so a narrower pane shows the same horizontal field (the whole zoomed-out view).
@@ -261,7 +282,7 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     width, cx = width * S, cx * S   # layout units -> canvas pixels
     C = lvlh_C(T_VIS); V2.STARS = V2.H5["STARS_ECI"] @ C.T
     img = LOOK.background(Rc, Pc, cx, width)
-    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far)
+    LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far, trail_end_alpha=TRAIL_A)
     sel = roles_s > 0.5
     for k, (n0, n1) in m_sc.items():
         mainsc.set_visible(n0, not sel); mainsc.set_visible(n1, sel); T_ = T44(W.R_sc[k], W.sc[k])
@@ -459,8 +480,14 @@ def cam_block():
     Kcs = []
     for k in CAMS:
         Rc, pc = W.cam_pose(k)
-        near = k == "docker" and np.linalg.norm(W.sc["docker"] - (filt.p if filt.q is not None else np.zeros(3))) < 11.0
-        Kc = Kn if near else K; Kcs.append(Kc)
+        d_est = float(np.linalg.norm(W.sc["docker"] - (filt.p if filt.q is not None else np.zeros(3)))); near = k == "docker" and d_est < 11.0
+        # near-field switch (Daniel 2026-11-16: the hard 30->62 deg cut read as a jump back): inside 11 m of estimated range (the same
+        # quantity that stops tracking there, so every tracked frame keeps the exact 30 deg K) the focal length shrinks as (d/11)^0.8 down
+        # to the 62 deg near-field lens (reached ~4 m): TOPEX's apparent size f/d still grows (as d^-0.2), so the view never pulls back
+        if near:
+            fz = max(K[0, 0] * (d_est / 11.0) ** 0.8, Kn[0, 0]); Kc = Kn if fz <= Kn[0, 0] else np.array([[fz, 0, RES / 2], [0, fz, RES / 2], [0, 0, 1.0]])
+        else: Kc = K
+        Kcs.append(Kc)
         rng_ = float(np.linalg.norm(W.sc["docker"])) if near else 0.0
         st = ir_state(k)
         if st == "dark": col = np.zeros((RES, RES, 3), np.uint8); IR["fresh"] = False
@@ -728,7 +755,7 @@ def tile_frame(tile, acc):
 def cam_tile(i, k, gray, Rc, pc, Kc, est_ok, R_est, p_est):
     gt = gray if k != "docker" else auto_expose(gray, 150)
     tile = cv2.cvtColor(cv2.resize(gt, (TILE * S, TILE * S), interpolation=cv2.INTER_AREA), cv2.COLOR_GRAY2BGR)
-    if est_ok and not (k == "docker" and Kc is Kn) and ir_state(k) != "dark":   # camera off: no state overlay on its (black) view
+    if est_ok and not (k == "docker" and Kc is not K) and ir_state(k) != "dark":   # camera off: no state overlay on its (black) view
         draw_axes_overlay(tile, Rc.T @ W.R_IB, Rc.T @ (np.zeros(3) - pc), (120, 120, 120), TILE * S / RES, Kc)
         draw_axes_overlay(tile, Rc.T @ R_est, Rc.T @ (p_est - pc), None, TILE * S / RES, Kc)
     acc = tuple(int(c * 255) for c in ACC[k][::-1])
@@ -931,6 +958,7 @@ while True:
         # camera (v2 ending): close in on the cluster as the Hall thrusters light and follow it ~3.5 s, then stop following and pull
         # back / swing round while the three craft accelerate away and shrink into the distance
         th = max(0.0, te - E_HALL); uu = float(V2.smoother(th / 7.5))
+        TRAIL_A = 1.0 - float(V2.ss(0.0, 1.2, th))   # trails drop as the Hall thrusters light (no departure ellipse sweep)
         global END_FR
         if th <= 3.5 or "END_FR" not in globals():   # follow the cluster (all three kept in the picture), then freeze the framing
             pc3_ = np.array([W.sc[k] for k in CRAFT3]); c_now = pc3_.mean(0); END_FR = (c_now, 2.0 * float(np.linalg.norm(pc3_ - c_now, axis=1).max()))

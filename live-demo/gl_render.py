@@ -123,9 +123,8 @@ class GLScene:
             Mn = np.linalg.inv(M[:3, :3]).T; pr["Mn"].write(Mn.T.astype("f4").tobytes())
             (o.get("vao_hq", o["vao"]) if hq else o["vao"]).render(moderngl.TRIANGLES)
         self.ctx.front_face = "ccw"
-        r = None
-        if msaa:
-            self.ctx.copy_framebuffer(frs, fms); r = self._screen_rect(K, W, H, V, n)   # (poses as drawn) only this rect can be non-zero
+        r = self._screen_rect(K, W, H, V, n)   # (poses as drawn) only this rect can differ from the clear values
+        if msaa: self.ctx.copy_framebuffer(frs, fms)
         if _glFlush is not None: _glFlush()   # start the GPU on it now, so a deferred fetch() overlaps CPU work
         return lambda: self._fetch(fbo, frs if msaa else None, W, H, n, f, depth, msaa, r)
     def _fetch(self, fbo, frs, W, H, n, f, depth, msaa, r):
@@ -138,9 +137,22 @@ class GLScene:
                 sub = np.empty((y1 - y0, x1 - x0, 4), np.uint8); frs.read_into(sub, viewport=(x0, y0, x1 - x0, y1 - y0), components=4, attachment=0)
                 rgb[y0:y1, x0:x1] = sub[:, :, :3]; al[y0:y1, x0:x1] = sub[:, :, 3]
             return rgb, al
+        if r is not None:   # read only rect r: outside it colour stays the clear 0 and depth the clear 1.0 (-> metric 0)
+            x0, y0, x1, y1 = r; col = np.zeros((H, W, 3), np.uint8); zf = np.zeros((H, W), np.float32) if depth else None
+            if x1 > x0 and y1 > y0:   # image rows are flipped vs GL rows: image row v = GL row H-1-v
+                vp = (x0, H - y1, x1 - x0, y1 - y0)
+                sub = np.empty((y1 - y0, x1 - x0, 3), np.uint8); fbo.read_into(sub, viewport=vp, components=3, attachment=0)
+                col[y0:y1, x0:x1] = sub[::-1]
+                if depth:
+                    d = np.empty((y1 - y0, x1 - x0), np.float32); fbo.read_into(d, viewport=vp, components=1, attachment=-1, dtype="f4")
+                    zf[y0:y1, x0:x1] = self._metric(d[::-1].astype(np.float64), n, f)
+            return col, zf
         col = np.empty((H, W, 3), np.uint8); fbo.read_into(col, components=3, attachment=0); col = cv2.flip(col, 0)
         if not depth: return col, None
-        d = np.empty((H, W), np.float32); fbo.read_into(d, components=1, attachment=-1, dtype="f4"); d = d[::-1].astype(np.float64)
+        d = np.empty((H, W), np.float32); fbo.read_into(d, components=1, attachment=-1, dtype="f4")
+        return col, self._metric(d[::-1].astype(np.float64), n, f)
+    @staticmethod
+    def _metric(d, n, f):
         # z = 2fn / ((f+n) - (2d-1)(f-n)), the same float64 operations in the same order, done in place (bit-identical, fewer passes)
         z = d * 2.0; z -= 1.0; z *= (f - n); np.subtract(f + n, z, out=z); np.divide(2.0 * f * n, z, out=z); z[d >= 1.0 - 1e-7] = 0.0
-        return col, z.astype(np.float32)
+        return z.astype(np.float32)

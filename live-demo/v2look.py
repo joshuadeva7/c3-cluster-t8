@@ -30,6 +30,31 @@ def _blend_roi(img, q, pad, a, draw, b=None):
     if x0 >= x1 or y0 >= y1: return
     sub = img[y0:y1, x0:x1]; ov = sub.copy(); draw(ov, q - np.array([x0 * 16, y0 * 16], np.int32)); cv2.addWeighted(ov, a, sub, b, 0, sub)
 
+_TB = {}
+def _blend_tiled(img, q, pad, a, col, t, T=64):
+    """_blend_roi for a long thin polyline whose bounding box is mostly empty (a V-bar line across the frame, a big ring).
+    The line is drawn once, in full, into the same box with the same offsets as _blend_roi (so the same pixels), onto a scratch frame in which only
+    the TxT tiles within pad px of some segment hold a copy of img; it can touch nothing else, so only those tiles are
+    blended back. Per-pixel the same addWeighted as one blend over the whole box: pixel-identical. False = box small, not used."""
+    H, W = img.shape[:2]
+    x0 = max(0, int(q[:, 0].min()) // 16 - pad); x1 = min(W, -(-int(q[:, 0].max()) // 16) + pad + 1)
+    y0 = max(0, int(q[:, 1].min()) // 16 - pad); y1 = min(H, -(-int(q[:, 1].max()) // 16) + pad + 1)
+    if (x1 - x0) * (y1 - y0) < 60000 or len(q) < 2: return False
+    lo = np.minimum(q[:-1], q[1:]) // 16 - pad; hi = -(-np.maximum(q[:-1], q[1:]) // 16) + pad + 1   # per-segment px box (half-open)
+    lo = np.maximum(lo, 0); hi = np.minimum(hi, [W, H]); ok = (hi[:, 0] > lo[:, 0]) & (hi[:, 1] > lo[:, 1])
+    nty, ntx = -(-H // T), -(-W // T); g = np.zeros((nty, ntx), bool)
+    for (ax, ay), (bx, by) in zip(lo[ok] // T, (hi[ok] - 1) // T): g[ay:by + 1, ax:bx + 1] = True
+    k = img.shape; ov = _TB.get(k)
+    if ov is None: ov = _TB[k] = np.empty(k, np.uint8)
+    runs = []
+    for ty in range(nty):
+        r = g[ty]; ix = np.flatnonzero(np.diff(np.r_[0, r.astype(np.int8), 0]))
+        for c0, c1 in zip(ix[::2], ix[1::2]): runs.append((ty * T, min(H, ty * T + T), c0 * T, min(W, c1 * T)))
+    for (r0, r1, c0, c1) in runs: ov[r0:r1, c0:c1] = img[r0:r1, c0:c1]
+    cv2.polylines(ov[y0:y1, x0:x1], [q - np.array([x0 * 16, y0 * 16], np.int32)], False, col, t, cv2.LINE_AA, shift=4)   # same view + offsets as _blend_roi
+    for (r0, r1, c0, c1) in runs: sub = img[r0:r1, c0:c1]; cv2.addWeighted(ov[r0:r1, c0:c1], a, sub, 1 - a, 0, sub)
+    return True
+
 def cam(v, el_override=True):
     """v2 camera at story time v -> (R camera->world in OpenCV axes, position, distance d)."""
     v = float(np.clip(v, 21.0, LK[-1, 0])); el = float(LKI[3](v))
@@ -56,7 +81,8 @@ class Look:
         pts = np.clip(pts[np.isfinite(pts).all(1)], -2e4, 2e4)
         if a <= 0.005 or len(pts) < 2: return
         q = np.round(pts * 16).astype(np.int32); t = max(1, int(round(lw)))
-        _blend_roi(img, q, t + 3, a, lambda ov, q_: cv2.polylines(ov, [q_], False, col, t, cv2.LINE_AA, shift=4))
+        if not _blend_tiled(img, q, t + 3, a, col, t):
+            _blend_roi(img, q, t + 3, a, lambda ov, q_: cv2.polylines(ov, [q_], False, col, t, cv2.LINE_AA, shift=4))
     def _dot(self, img, xy, col, a, s):
         if a <= 0.01 or not np.isfinite(xy).all(): return
         rad = max(1.0, 0.5 * math.sqrt(s) * self.lw); r16 = int(round(rad * 16))

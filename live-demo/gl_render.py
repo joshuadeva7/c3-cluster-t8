@@ -45,6 +45,14 @@ class GLScene:
         self.objs.append(dict(vao=vao, pose=np.array(pose, float), visible=True)); return len(self.objs) - 1
     def set_pose(self, i, T): self.objs[i]["pose"] = np.array(T, float)
     def set_visible(self, i, vis): self.objs[i]["visible"] = bool(vis)
+    def _fbo_ms(self, w, h, samples):
+        k = ("ms", w, h, samples)
+        if k not in self.fbos:   # multisampled colour + depth, resolved into a plain RGBA8 target (alpha = pixel coverage)
+            ms = self.ctx.framebuffer(color_attachments=[self.ctx.renderbuffer((w, h), 4, samples=samples)],
+                                      depth_attachment=self.ctx.depth_renderbuffer((w, h), samples=samples))
+            rs = self.ctx.framebuffer(color_attachments=[self.ctx.renderbuffer((w, h), 4)])
+            self.fbos[k] = (ms, rs)
+        return self.fbos[k]
     def _fbo(self, w, h):
         if (w, h) not in self.fbos:
             # colour RGBA8 + 32-bit float depth TEXTURE; metric depth is recovered from the standard depth buffer
@@ -52,13 +60,17 @@ class GLScene:
             col = self.ctx.renderbuffer((w, h), 4); d = self.ctx.depth_texture((w, h))
             self.fbos[(w, h)] = self.ctx.framebuffer(color_attachments=[col], depth_attachment=d)
         return self.fbos[(w, h)]
-    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False):
+    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0):
+        """depth=True: (RGB, metric depth). depth=False: (RGB, None). msaa=N (display views only): N-sample anti-aliased edges,
+        returns (RGB premultiplied over black, coverage alpha float32 0..1) -- composite as img*(1-a) + rgb."""
         n, f = znear, zfar
         P = np.array([[2 * K[0, 0] / W, 0, 2 * K[0, 2] / W - 1, 0],
                       [0, -2 * K[1, 1] / H, 1 - 2 * K[1, 2] / H, 0],
                       [0, 0, (f + n) / (f - n), -2 * f * n / (f - n)], [0, 0, 1, 0]], np.float64)
         V = np.eye(4); V[:3, :3] = R_IC.T; V[:3, 3] = -R_IC.T @ p_IC
-        fbo = self._fbo(W, H); fbo.use(); fbo.clear(0, 0, 0, 0)
+        if msaa: fms, frs = self._fbo_ms(W, H, msaa); fbo = fms
+        else: fbo = self._fbo(W, H)
+        fbo.use(); fbo.clear(0, 0, 0, 0)
         self.ctx.enable(moderngl.DEPTH_TEST); self.ctx.disable(moderngl.CULL_FACE)
         s = np.asarray(sun_w, float); s = s / np.linalg.norm(s)
         pr = self.prog; pr["V"].write(V.T.astype("f4").tobytes()); pr["P"].write(P.T.astype("f4").tobytes())
@@ -70,7 +82,12 @@ class GLScene:
             M = o["pose"]; pr["M"].write(M.T.astype("f4").tobytes())
             Mn = np.linalg.inv(M[:3, :3]).T; pr["Mn"].write(Mn.T.astype("f4").tobytes())
             o["vao"].render(moderngl.TRIANGLES)
+        if msaa:
+            self.ctx.copy_framebuffer(frs, fms)
+            rgba = np.frombuffer(frs.read(components=4, attachment=0), np.uint8).reshape(H, W, 4)[::-1]
+            return np.ascontiguousarray(rgba[:, :, :3]), rgba[:, :, 3].astype(np.float32) * (1.0 / 255.0)
         col = np.frombuffer(fbo.read(components=3, attachment=0), np.uint8).reshape(H, W, 3)[::-1]
+        if not depth: return np.ascontiguousarray(col), None
         d = np.frombuffer(fbo.read(components=1, attachment=-1, dtype="f4"), np.float32).reshape(H, W)[::-1].astype(np.float64)
         zn = 2.0 * d - 1.0; z = (2.0 * f * n) / ((f + n) - zn * (f - n)); z[d >= 1.0 - 1e-7] = 0.0
         return np.ascontiguousarray(col), np.ascontiguousarray(z.astype(np.float32))

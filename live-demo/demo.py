@@ -34,6 +34,8 @@ p.add_argument("--no_cutscene", action="store_true"); p.add_argument("--no_prolo
 p.add_argument("--prologue_warp", type=float, default=400.0, help="mission-time warp while the imagers transfer into the NMC")
 p.add_argument("--detumble_warp", type=float, default=600.0); p.add_argument("--fps_out", type=int, default=10)
 p.add_argument("--until_grip", action="store_true", help="stop 2 s after the grip (verification runs)"); p.add_argument("--metrics", default=""); p.add_argument("--seed", type=int, default=0)
+p.add_argument("--hd", type=int, default=0, help="canvas pixels per layout unit: 0 = auto (the window's Retina factor; 1 headless), 1, 2")
+p.add_argument("--msaa", type=int, default=-1, help="anti-aliasing samples for the main / chase 3D views: -1 = auto (4 in a window, 0 headless), 0 = off")
 p.add_argument("--sun_unknown", action="store_true", help="tracker references use a fixed default sun (lighting-mismatch stress)")
 a = p.parse_args()
 rng = np.random.default_rng(a.seed)
@@ -111,6 +113,13 @@ WIN_W, WIN_H = 1280, 720                       # = the cutscene video's 16:9 fra
 WMAX3 = np.array([RATE_LIMITS["wx"], RATE_LIMITS["wy_max"], RATE_LIMITS["wz"]])
 def rates_valid(w): return abs(w[0]) <= RATE_LIMITS["wx"] + 1e-9 and abs(w[2]) <= RATE_LIMITS["wz"] + 1e-9 and RATE_LIMITS["wy_min"] - 1e-9 <= abs(w[1]) <= RATE_LIMITS["wy_max"] + 1e-9
 DISP = ui_window.Display(WIN_W, WIN_H, a.headless, wmax=tuple(WMAX3), w0=(0.0, RATE_LIMITS["wy_default"], 0.0))
+# HiDPI (2026-11-16): every layout number in this file stays in 1280 x 720 units; the canvas itself is S x that (S = 2 on a
+# Retina window), so text, lines and the 3D views are drawn at the screen's real resolution instead of being stretched 2x.
+S = a.hd if a.hd > 0 else (1 if a.headless else max(1, min(2, int(round(DISP.framebuffer_px()[0] / WIN_W)))))
+UT.S = S; ui_window.S = S; PW, PH = WIN_W * S, WIN_H * S
+MSAA = a.msaa if a.msaa >= 0 else (0 if a.headless else 4)
+def P(v): return int(round(v * S))
+print(f"[display: canvas {PW}x{PH} (S={S}), msaa={MSAA}]", flush=True)
 RES = a.camres; K = R_.K_for(RES, 30.0)
 world = gl_render.GLScene(DISP.ctx)
 n_top = world.add(tm)
@@ -124,7 +133,7 @@ class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by th
         return self.scene.render(K, RES, RES, Rm.T, -Rm.T @ t, Rm.T @ s, znear=0.3, zfar=2000)
 ref = RefRenderer()
 Kn = R_.K_for(RES, 62.0)     # docker near-field camera (range < 11 m): wide FOV, close near plane, illuminator on
-ARMRES = 240; Ka = R_.K_for(ARMRES, 88.0)
+ARMRES = 240 * S; Ka = R_.K_for(ARMRES, 88.0)   # the arm cam fills a misc square: rendered at that square's real pixel size
 # Chase cam + thruster plumes (Daniel 2026-11-11, "make the thrusters fire"). Thruster LAYOUT is an ASSUMPTION for the visual only:
 # the physics uses 1 N thrusters at a 0.5 m lever (TRR / v2). Couple nozzles sit at +-0.5 m on the docker's body axes and fire
 # tangentially; translation nozzles fire opposite the commanded delta-v. Plume length scales with the commanded thrust.
@@ -147,7 +156,7 @@ def _nozzles(FIRE):
     if dn > 1e-7:
         out.append((-0.6 * dv / dn, -dv / dn, 1.0)); out.append((-0.6 * dv / dn + 0.15 * np.cross(dv / dn, [0, 0, 1.0 if abs(dv[2]) < 0.9 * dn else 0]), -dv / dn, 0.8))
     return out
-def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None):
+def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas pixels per layout unit
     Kp = Kch if Kp is None else Kp
     over = np.zeros_like(img, np.float32)
     def proj(pw):
@@ -160,21 +169,22 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None):
         a = proj(p0); b = proj(p0 + Rd @ ex * L)
         if a is None or b is None: continue
         a = np.array(a); b = np.array(b); dvec = b - a; ln = np.linalg.norm(dvec)
-        if ln < 1.0: cv2.circle(over, tuple(int(v) for v in a), 5, tuple(255.0 * thr for _ in range(3)), -1, cv2.LINE_AA); continue
+        if ln < 1.0 * sc: cv2.circle(over, tuple(int(v) for v in a), 5 * sc, tuple(255.0 * thr for _ in range(3)), -1, cv2.LINE_AA); continue
         nrm = np.array([-dvec[1], dvec[0]]) / ln
         for frac, wmul, col in ((1.0, 0.45, (30, 110, 255)), (0.75, 0.28, (90, 180, 255)), (0.45, 0.12, (225, 245, 255))):   # orange glow -> white-hot core (BGR)
-            e = a + dvec * frac; w0 = 1.5; w1 = max(2.5, wmul * ln)
+            e = a + dvec * frac; w0 = 1.5 * sc; w1 = max(2.5 * sc, wmul * ln)
             poly = np.array([a + nrm * w0, e + nrm * w1, e - nrm * w1, a - nrm * w0], np.int32)
             cv2.fillPoly(over, [poly], tuple(c * (0.35 + 0.65 * thr) for c in col), cv2.LINE_AA)
-        cv2.circle(over, tuple(int(v) for v in a), 3, (255, 255, 255), -1, cv2.LINE_AA)
-    over = cv2.GaussianBlur(over, (0, 0), 3.0) * 1.3 + cv2.GaussianBlur(over, (0, 0), 0.8) * 0.5
+        cv2.circle(over, tuple(int(v) for v in a), 3 * sc, (255, 255, 255), -1, cv2.LINE_AA)
+    if not over.any(): return img   # nothing firing: identical result, skips two full-size blurs
+    over = cv2.GaussianBlur(over, (0, 0), 3.0 * sc) * 1.3 + cv2.GaussianBlur(over, (0, 0), 0.8 * sc) * 0.5
     return np.clip(img.astype(np.float32) + over, 0, 255).astype(np.uint8)
-def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=()):
+def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0):
     for k, n in n_sc.items(): world.set_visible(n, k != own and k not in hide)   # a camera never sees its own bus
     world.set_visible(n_arm, own != "docker")
-    Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else (CHRES if Kc is Kch else (TILE if Kc is Kest else RES))
+    Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else (CHRES if Kc is Kch else (TILE * S if Kc is Kest else RES))
     ww, hh = wh if wh is not None else (n_, n_)
-    return world.render(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head)
+    return world.render(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head, depth=depth, msaa=msaa)
 def auto_expose(g, target=200.0):   # display auto-exposure: 97th percentile of lit pixels -> target
     m = g > 6
     if m.sum() < 30: return g
@@ -186,7 +196,7 @@ def auto_expose(g, target=200.0):   # display auto-exposure: 97th percentile of 
 # background, stars, V-bar, hold markers, keep-out / 200 m rings, trails, far dots, burn rings, vignette; the models in the v2
 # colours with the v2 flat shading. Room frame = v2 LVLH, TOPEX at the origin.
 import v2look as V2
-LOOK = V2.Look(WIN_W, WIN_H); LOOK_F0 = LOOK.F
+LOOK = V2.Look(PW, PH); LOOK_F0 = LOOK.F   # canvas pixels (F, cy, line widths all scale with S)
 # ---- layout (Daniel 2026-11-12): main pane on the left, never covered; a right column of 3 square cams stacked (imagerA, imagerB,
 #      docker) with the TOPEX pose-estimate plot under them. Insets (inertial view / arm cam) sit flush in the main pane's bottom-left corner.
 # ---- layout v3 (Daniel 2026-11-12 1:36 PM): main pane in the MIDDLE, self-contained, never overlapped. Two square tiles stacked on
@@ -219,7 +229,8 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     """the main view: v2 background + vector layers, then the GL models (v2 shading) on top, then the vignette.
     The focal length scales with the pane width, so a narrower pane shows the same horizontal field (the whole zoomed-out view).
     want_mask: also return the content mask (models + a 6 px disc on every craft / TOPEX) for the overlay-coverage check."""
-    LOOK.F = LOOK_F0 * width / WIN_W * zoom; LOOK.cy = WIN_H / 2 - lift   # lift: picture centre raised (keeps the bottom error line clear)
+    LOOK.F = LOOK_F0 * width / WIN_W * zoom; LOOK.cy = (WIN_H / 2 - lift) * S   # lift: picture centre raised (keeps the bottom error line clear)
+    width, cx = width * S, cx * S   # layout units -> canvas pixels
     C = lvlh_C(T_VIS); V2.STARS = V2.H5["STARS_ECI"] @ C.T
     img = LOOK.background(Rc, Pc, cx, width)
     LOOK.overlays(img, Rc, Pc, d, cx, v, (TM_D, nmc_tw(TM_I), nmc_tw(TM_I)), roles_s, burn_flash=flashes, pos=[W.sc[k] for k in CRAFT3], tails=tails, hide_far=hide_far)
@@ -231,16 +242,21 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     mainsc.set_visible(m_arm[0], not sel); mainsc.set_visible(m_arm[1], sel); mainsc.set_pose(m_arm[0], Ta); mainsc.set_pose(m_arm[1], Ta)
     mainsc.set_pose(m_top, T44(W.R_IB, np.zeros(3)))
     zn = float(np.clip(d * 0.01, 0.05, 5.0))
-    col, dep = mainsc.render(LOOK.K(cx, WIN_H / 2 - lift), width, WIN_H, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True)
-    m = dep > 0; img[m] = col[:, :, ::-1][m]
-    out = LOOK.vignette(img, 0 if width == WIN_W else (WIN_W - width) // 2)
+    if MSAA:   # anti-aliased model edges: blend by pixel coverage (alpha); fully covered pixels are exactly the model colour
+        col, al = mainsc.render(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True, msaa=MSAA)
+        m = al > 0; ys_, xs_ = np.nonzero(m); a_ = al[ys_, xs_][:, None]
+        img[ys_, xs_] = (img[ys_, xs_] * (1.0 - a_) + col[ys_, xs_, ::-1] + 0.5).astype(np.uint8)
+    else:
+        col, dep = mainsc.render(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True)
+        m = dep > 0; img[m] = col[:, :, ::-1][m]
+    out = LOOK.vignette(img, 0 if width == PW else (PW - width) // 2)
     if want_mask:
         mk = m.astype(np.uint8); LOOK.lines_mask = cv2.absdiff(img, LOOK.after_vbar).max(axis=2) > 20   # strict: models (+ discs below); lines: trails / keep-out ring / dots
         xy, z = LOOK.project(Rc, Pc, np.array([np.zeros(3)] + [W.sc[k] for k in CRAFT3]), cx)
         for (x_, y_), z_ in zip(xy, z):
-            if z_ > 0 and np.isfinite([x_, y_]).all() and -50 < x_ < width + 50 and -50 < y_ < WIN_H + 50: cv2.circle(mk, (int(x_), int(y_)), 6, 1, -1)
-        LOOK.F = LOOK_F0; LOOK.cy = WIN_H / 2; return out, mk > 0
-    LOOK.F = LOOK_F0; LOOK.cy = WIN_H / 2
+            if z_ > 0 and np.isfinite([x_, y_]).all() and -50 * S < x_ < width + 50 * S and -50 * S < y_ < PH + 50 * S: cv2.circle(mk, (int(x_), int(y_)), 6 * S, 1, -1)
+        LOOK.F = LOOK_F0; LOOK.cy = PH / 2; return out, mk > 0
+    LOOK.F = LOOK_F0; LOOK.cy = PH / 2
     return out
 
 # ------------------------------------------------------------------ truth state
@@ -312,7 +328,7 @@ class Autonomy:
 A = Autonomy()
 
 def acquire(cam="imagerA", group="I"):
-    Rc, pc = W.cam_pose(cam); col, _ = render_view(Rc, pc, own=cam); g = R_.degrade(col, rng)
+    Rc, pc = W.cam_pose(cam); col, _ = render_view(Rc, pc, own=cam, depth=False); g = R_.degrade(col, rng)
     m = g > 12
     if m.sum() < 50: return False
     ys, xs = np.nonzero(m); cx, cy = xs.mean(), ys.mean(); ext = max(np.ptp(xs), np.ptp(ys))
@@ -336,7 +352,7 @@ def acquire(cam="imagerA", group="I"):
 
 # ------------------------------------------------------------------ dashboard
 F = cv2.FONT_HERSHEY_SIMPLEX
-def txt(img, s, x, y, sc=0.45, col=(230, 230, 230), th=1): cv2.putText(img, s, (int(x), int(y)), F, sc, col, th, cv2.LINE_AA)
+def txt(img, s, x, y, sc=0.45, col=(230, 230, 230), th=1): cv2.putText(img, s, (int(x * S), int(y * S)), F, sc * S, col, th * S, cv2.LINE_AA)   # layout units
 HIST = collections.deque(maxlen=600); FULL = []
 def draw_axes_overlay(img, Rcb, tcb, col, scale, Kc=None):
     P = np.array([[0, 0, 0], [3, 0, 0], [0, 3, 0], [0, 0, 3.0]])
@@ -345,7 +361,7 @@ def draw_axes_overlay(img, Rcb, tcb, col, scale, Kc=None):
     u = X @ (K if Kc is None else Kc).T; u = u[:, :2] / u[:, 2:] * scale
     if not np.isfinite(u).all() or np.abs(u).max() > 5000: return
     for j, c in zip((1, 2, 3), ((60, 60, 255), (60, 255, 60), (255, 120, 60))):
-        cv2.line(img, tuple(u[0].astype(int)), tuple(u[j].astype(int)), c if col is None else col, 2 if col is None else 1, cv2.LINE_AA)
+        cv2.line(img, tuple(u[0].astype(int)), tuple(u[j].astype(int)), c if col is None else col, (2 if col is None else 1) * S, cv2.LINE_AA)
 def plot(img, x0, y0, w, h, series, cols, lo, hi, label):
     cv2.rectangle(img, (x0, y0), (x0 + w, y0 + h), (60, 60, 60), 1); txt(img, label, x0 + 4, y0 + 14, 0.4, (200, 200, 200))
     if len(HIST) < 2: return
@@ -393,12 +409,12 @@ def ir_state(k):
     return "dark" if W.t - IR["t_fail"] < IR_DARK else "ir"
 writer = None
 if a.record:
-    writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), a.fps_out, (WIN_W, WIN_H))
+    writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), a.fps_out, (PW, PH))
 
 def keys_of(ev): return [e[1] for e in ev if e[0] == "key"]
 def badge(img, text, x, y, col=(80, 200, 255)):
-    (tw, th), _ = cv2.getTextSize(text, F, 0.6, 2); cv2.rectangle(img, (x, y), (x + tw + 20, y + th + 16), (20, 20, 20), -1)
-    cv2.rectangle(img, (x, y), (x + tw + 20, y + th + 16), col, 1); txt(img, text, x + 10, y + th + 8, 0.6, col, 2)
+    (tw, th), _ = cv2.getTextSize(text, F, 0.6, 2); cv2.rectangle(img, (P(x), P(y)), (P(x + tw + 20), P(y + th + 16)), (20, 20, 20), -1)
+    cv2.rectangle(img, (P(x), P(y)), (P(x + tw + 20), P(y + th + 16)), col, S); txt(img, text, x + 10, y + th + 8, 0.6, col, 2)
 def pause_loop(canvas, main_w):
     """P toggles: everything (sim time, dynamics, estimation, UI) is frozen; the last frame stays up with a PAUSED badge."""
     c = canvas.copy(); badge(c, "PAUSED", main_w - 120, 14)
@@ -409,6 +425,7 @@ def pause_loop(canvas, main_w):
 def emit(canvas, main_w, allow_pause=True):
     """write / show one frame; returns 'quit' or the list of keys."""
     if writer is not None: writer.write(canvas)
+    if _os.environ.get("DEMO_DUMP") and frame % 5 == 0: cv2.imwrite(_os.path.join(_os.environ["DEMO_DUMP"], f"f{frame:05d}.png"), canvas)
     if a.headless: return []
     k = keys_of(DISP.show(canvas))
     if "q" in k: return "quit"
@@ -418,7 +435,7 @@ def emit(canvas, main_w, allow_pause=True):
     return k
 def title_screen():
     """ready screen: nothing starts until Enter (or S), so the demo can be queued before a talk."""
-    canvas = np.empty((WIN_H, WIN_W, 3), np.uint8); canvas[:] = V2.BG
+    canvas = np.empty((PH, PW, 3), np.uint8); canvas[:] = V2.BG
     # text wrapped in the left column, mission patch on the right (Daniel 2026-11-12)
     PS = 400; px0, py0 = WIN_W - 70 - PS, (WIN_H - PS) // 2; TW = px0 - 50 - 96
     blocks = [("AE 4322 Team 8: Spacecraft With Autonomous Rendezvous and Manipulation", 32, True, (240, 240, 240), 10),
@@ -432,8 +449,9 @@ def title_screen():
         y += gap
     pp = cv2.imread(_os.path.join(HERE, "assets", "swarm_patch.png"), cv2.IMREAD_UNCHANGED)
     if pp is not None:
-        pp = cv2.resize(pp, (PS, PS), interpolation=cv2.INTER_AREA); al = pp[:, :, 3:4].astype(np.float32) / 255.0 if pp.shape[2] == 4 else 1.0
-        roi = canvas[py0:py0 + PS, px0:px0 + PS].astype(np.float32); canvas[py0:py0 + PS, px0:px0 + PS] = (roi * (1 - al) + pp[:, :, :3].astype(np.float32) * al).astype(np.uint8)
+        PSp, px0, py0 = PS * S, px0 * S, py0 * S
+        pp = cv2.resize(pp, (PSp, PSp), interpolation=cv2.INTER_AREA); al = pp[:, :, 3:4].astype(np.float32) / 255.0 if pp.shape[2] == 4 else 1.0
+        roi = canvas[py0:py0 + PSp, px0:px0 + PSp].astype(np.float32); canvas[py0:py0 + PSp, px0:px0 + PSp] = (roi * (1 - al) + pp[:, :, :3].astype(np.float32) * al).astype(np.uint8)
     if writer is not None:
         for _ in range(max(1, int(1 * a.fps_out))): writer.write(canvas)
     if a.headless: return True
@@ -448,7 +466,7 @@ def play_cutscene():
     while True:
         ok, fr = cap.read()
         if not ok: break
-        if fr.shape[:2] != (WIN_H, WIN_W): fr = cv2.resize(fr, (WIN_W, WIN_H), interpolation=cv2.INTER_AREA)
+        if fr.shape[:2] != (PH, PW): fr = cv2.resize(fr, (PW, PH), interpolation=cv2.INTER_AREA if fr.shape[1] > PW else cv2.INTER_LINEAR)
         last = fr
         if writer is not None and n % max(1, round(fps / a.fps_out)) == 0: writer.write(fr)
         n += 1
@@ -494,9 +512,10 @@ def flashes(dt_):
     FLASH[:] = [f_ for f_ in FLASH if f_[1] < 1.0]; return [(k, u) for k, u in FLASH]
 def warp_tag(img, x, y, s1, s2=None, alpha=1.0):
     if alpha <= 0.01: return
-    ov = img.copy(); txt(ov, s1, x, y, 0.5, (175, 190, 215), 1)
-    if s2: txt(ov, s2, x, y + 20, 0.42, (130, 140, 160), 1)
-    cv2.addWeighted(ov, alpha, img, 1 - alpha, 0, img)
+    y0_, y1_ = max(0, P(y - 22)), P(y + (32 if s2 else 12))   # rows the text can touch: blending only them == the full-frame blend
+    sub = img[y0_:y1_]; ov = sub.copy(); txt(ov, s1, x, y - y0_ / S, 0.5, (175, 190, 215), 1)
+    if s2: txt(ov, s2, x, y + 20 - y0_ / S, 0.42, (130, 140, 160), 1)
+    cv2.addWeighted(ov, alpha, sub, 1 - alpha, 0, sub)
 def hms(t): t = max(0.0, t); return f"{int(t // 3600):d}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}"
 # ONE true mission clock (Daniel 2026-11-12): total elapsed mission time INCLUDING every speed-up, shown top-left and nowhere else.
 T_CLOCK = P_HOLD
@@ -515,12 +534,12 @@ def cover_log(stage, mask, rects, extra=None):
     tot = int(mask.sum()); cov = 0; per = []
     for nm, r in rects:
         if r is None: continue
-        x0, y0, x1, y1 = (int(v) for v in r); c_ = int(mask[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].sum()); cov += c_; per.append((nm, c_))
+        x0, y0, x1, y1 = (int(v) * S for v in r); c_ = int(mask[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].sum()); cov += c_; per.append((nm, c_))
     lm = getattr(LOOK, "lines_mask", None) if stage != "OPS" or (extra or {}).get("main") != "chase" else None; lc = 0
     if lm is not None:
         for nm, r in rects:
             if r is None or nm in ("errtext", "message"): continue   # text drawn over a line still shows the line around the glyphs
-            x0, y0, x1, y1 = (int(v) for v in r); lc += int(lm[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].sum())
+            x0, y0, x1, y1 = (int(v) * S for v in r); lc += int(lm[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].sum())
     COVER.write(json.dumps(dict(frame=frame, t_demo=round(t_demo, 2), stage=stage, ph=A.ph, content_px=tot, covered_px=cov, per=per, lines_covered_px=lc, **(extra or {}))) + "\n")
 LBL = {"docker": "docker", "imagerA": "imager A", "imagerB": "imager B"}
 # phase title pop-ups (Daniel 2026-11-12): top centre of the main pane, fade in 0.35 s, hold, fade out 0.5 s (2.8 s total).
@@ -542,11 +561,14 @@ def formation_labels(img, Rc, Pc, cx, alpha):
     if alpha <= 0.01: return []
     out = []
     for k in CRAFT3:
-        xy, z = LOOK.project(Rc, Pc, W.sc[k], cx)
+        xy, z = LOOK.project(Rc, Pc, W.sc[k], cx * S)
         if z[0] <= 0 or not np.isfinite(xy).all(): continue
-        x_, y_ = float(xy[0, 0]), float(xy[0, 1]); col = V2.bgr(V2.C_DOCK if k == "docker" else V2.C_IMG)
+        x_, y_ = float(xy[0, 0]) / S, float(xy[0, 1]) / S; col = V2.bgr(V2.C_DOCK if k == "docker" else V2.C_IMG)
         hgt = {"docker": 14, "imagerA": 38, "imagerB": 14}[k]   # neighbours on the V-bar sit at different heights: no overlap
-        ov = img.copy(); cv2.line(ov, (int(x_), int(y_) - 6), (int(x_), int(y_) - 6 - hgt), col, 1, cv2.LINE_AA); cv2.addWeighted(ov, alpha * 0.8, img, 1 - alpha * 0.8, 0, img)
+        if S == 1: xi_, yi_ = int(x_), int(y_)
+        else: xi_, yi_ = int(xy[0, 0]), int(xy[0, 1])
+        q_ = np.array([[xi_ * 16, (yi_ - 6 * S) * 16], [xi_ * 16, (yi_ - (6 + hgt) * S) * 16]], np.int32)   # == full-frame copy + blend
+        V2._blend_roi(img, q_, 3 * S, alpha * 0.8, lambda ov, q: cv2.line(ov, (int(q[0, 0]) // 16, int(q[0, 1]) // 16), (int(q[1, 0]) // 16, int(q[1, 1]) // 16), col, S, cv2.LINE_AA))
         out.append(UT.draw(img, LBL[k], x_, y_ - 26 - hgt, 13, col, alpha=alpha, anchor="c"))
     return out
 def err_text(img, att, rate, x_lo, x_hi):
@@ -568,7 +590,7 @@ def trace_push(est_ok, w_est, R_est):
 def dashed(img, pts, col):
     for i in range(0, len(pts) - 1, 4):
         seg = pts[i:i + 3]
-        if len(seg) >= 2: cv2.polylines(img, [seg], False, col, 1, cv2.LINE_AA)
+        if len(seg) >= 2: cv2.polylines(img, [seg], False, col, S, cv2.LINE_AA)
 def draw_trace(tile, k):
     # graph strip: a small label column on the left (directly under the x y z keys) holds the plotted range's max (top) and min
     # (bottom) in deg/s, no axis line; the traces fill the rest of the strip and share that range
@@ -576,7 +598,7 @@ def draw_trace(tile, k):
     lw_ = int(math.ceil(UT.segs_width([("-000", False)], 9)))   # fixed column width, so the traces never shift sideways
     lx1 = 4 + lw_; gx0, gx1 = lx1 + 4, TILE - 5
     yh, yl = gy0 + 18, gy1 - 6                                 # value lines of the max and min (labels centred on them, top one just under the keys)
-    ov = tile.copy(); cv2.rectangle(ov, (0, gy0 - 4), (TILE, TILE), (0, 0, 0), -1); cv2.addWeighted(ov, 0.72, tile, 0.28, 0, tile)
+    ov = tile.copy(); cv2.rectangle(ov, (0, P(gy0 - 4)), (P(TILE), P(TILE)), (0, 0, 0), -1); cv2.addWeighted(ov, 0.72, tile, 0.28, 0, tile)
     for j, nm in enumerate(("x", "y", "z")): UT.draw(tile, nm, 6 + 11 * j, gy0 - 2, 10, TR_C[j])
     UT.draw(tile, "deg/s", gx1, gy0 - 2, 10, (160, 160, 160), anchor="r")
     if len(TR[k]) < 2: return
@@ -585,23 +607,24 @@ def draw_trace(tile, k):
     hi, lo = math.ceil((hi - 0.5) / 5.0) * 5.0, math.floor((lo + 0.5) / 5.0) * 5.0   # data range out to the next multiple of 5 (sub-0.5 deg/s noise past it ignored)
     if hi - lo < 5.0: hi = lo + 5.0
     yv = lambda v: yh + (hi - v) / (hi - lo) * (yl - yh)
-    if lo < 0.0 < hi: y0_ = int(round(yv(0.0))); cv2.line(tile, (gx0, y0_), (gx1, y0_), (55, 55, 55), 1)   # zero line
+    if lo < 0.0 < hi: y0_ = int(round(yv(0.0))); cv2.line(tile, (P(gx0), P(y0_)), (P(gx1), P(y0_)), (55, 55, 55), S)   # zero line
     for v, yy in ((hi, yh - 7), (lo, yl - 7)):
         UT.draw(tile, f"{v:.0f}".replace("-0", "0") if v == 0 else f"{v:.0f}", lx1, yy, 9, (150, 150, 150), anchor="r")
     xs = gx1 - (t_demo - P_[:, 0]) / 30.0 * (gx1 - gx0)
     for j in range(3):   # truth first (dim, dashed), estimate on top (bright)
-        dashed(tile, np.c_[xs, yv(P_[:, 4 + j])].astype(np.int32), tuple(int(c * 0.45) for c in TR_C[j]))
+        dashed(tile, (np.c_[xs, yv(P_[:, 4 + j])] * S).astype(np.int32), tuple(int(c * 0.45) for c in TR_C[j]))
     for j in range(3):
         ye = yv(P_[:, 1 + j]); ok = np.isfinite(ye)
-        if ok.sum() >= 2: cv2.polylines(tile, [np.c_[xs[ok], ye[ok]].astype(np.int32)], False, TR_C[j], 1, cv2.LINE_AA)
+        if ok.sum() >= 2: cv2.polylines(tile, [(np.c_[xs[ok], ye[ok]] * S).astype(np.int32)], False, TR_C[j], S, cv2.LINE_AA)
 def tile_frame(tile, acc):
-    cv2.rectangle(tile, (0, 0), (TILE - 1, TILE - 1), acc, 1)
+    n_ = TILE * S
+    for i_ in range(S): cv2.rectangle(tile, (i_, i_), (n_ - 1 - i_, n_ - 1 - i_), acc, 1)   # S px frame, inside the square
 def cam_tile(i, k, gray, Rc, pc, Kc, est_ok, R_est, p_est):
     gt = gray if k != "docker" else auto_expose(gray, 150)
-    tile = cv2.cvtColor(cv2.resize(gt, (TILE, TILE), interpolation=cv2.INTER_AREA), cv2.COLOR_GRAY2BGR)
+    tile = cv2.cvtColor(cv2.resize(gt, (TILE * S, TILE * S), interpolation=cv2.INTER_AREA), cv2.COLOR_GRAY2BGR)
     if est_ok and not (k == "docker" and Kc is Kn):
-        draw_axes_overlay(tile, Rc.T @ W.R_IB, Rc.T @ (np.zeros(3) - pc), (120, 120, 120), TILE / RES, Kc)
-        draw_axes_overlay(tile, Rc.T @ R_est, Rc.T @ (p_est - pc), None, TILE / RES, Kc)
+        draw_axes_overlay(tile, Rc.T @ W.R_IB, Rc.T @ (np.zeros(3) - pc), (120, 120, 120), TILE * S / RES, Kc)
+        draw_axes_overlay(tile, Rc.T @ R_est, Rc.T @ (p_est - pc), None, TILE * S / RES, Kc)
     acc = tuple(int(c * 255) for c in ACC[k][::-1])
     if ir_state(k) == "ir": UT.draw(tile, "Infrared Camera View", TILE / 2, TILE - TRACE_H - 26, 12, (255, 255, 255), anchor="c")   # only after an IR failover, once IR is up
     draw_trace(tile, k)
@@ -609,18 +632,18 @@ def cam_tile(i, k, gray, Rc, pc, Kc, est_ok, R_est, p_est):
     return tile
 def build_columns(grays, Rcs, pcs, Kcs, est_ok, R_est, p_est, misc):
     """left column: docker cam over the misc view; right column: imagerA over imagerB. Black above / below the tiles."""
-    L = np.zeros((WIN_H, TILE, 3), np.uint8); Rr = np.zeros((WIN_H, TILE, 3), np.uint8)
+    L = np.zeros((PH, TILE * S, 3), np.uint8); Rr = np.zeros((PH, TILE * S, 3), np.uint8); t0_, t1_, t2_ = TY0 * S, (TY0 + TILE) * S, (TY0 + 2 * TILE) * S
     T_ = {k: cam_tile(i, k, grays[i], Rcs[i], pcs[i], Kcs[i], est_ok, R_est, p_est) for i, k in enumerate(CAMS)}
-    L[TY0:TY0 + TILE] = T_["docker"]; Rr[TY0:TY0 + TILE] = T_["imagerA"]; Rr[TY0 + TILE:TY0 + 2 * TILE] = T_["imagerB"]
-    m = misc if misc is not None else np.zeros((TILE, TILE, 3), np.uint8)
-    m = m.copy(); tile_frame(m, (110, 110, 110)); L[TY0 + TILE:TY0 + 2 * TILE] = m
+    L[t0_:t1_] = T_["docker"]; Rr[t0_:t1_] = T_["imagerA"]; Rr[t1_:t2_] = T_["imagerB"]
+    m = misc if misc is not None else np.zeros((TILE * S, TILE * S, 3), np.uint8)
+    m = m.copy(); tile_frame(m, (110, 110, 110)); L[t1_:t2_] = m
     return L, Rr
 def paste_columns(canvas, cols, u):
     """u = 0 .. 1: the columns slide in from the window edges (u = 1: fully in, flush with the main pane)."""
     if cols is None or u <= 0.001: return
-    L, Rr = cols; w = int(round(TILE * u))
+    L, Rr = cols; w = int(round(TILE * u)) * S
     if w <= 0: return
-    canvas[:, :w] = L[:, TILE - w:]; canvas[:, WIN_W - w:] = Rr[:, :w]
+    canvas[:, :w] = L[:, TILE * S - w:]; canvas[:, PW - w:] = Rr[:, :w]
 def col_rects(u):
     w = int(round(TILE * u))
     return [(0, 0, w, WIN_H), (WIN_W - w, 0, WIN_W, WIN_H)] if w > 0 else []
@@ -628,7 +651,7 @@ def rect_hit(m_, rects, pad=0):
     for r in rects:
         if r is None: continue
         x0, y0, x1, y1 = (int(v) for v in r)
-        if m_[max(0, y0 - pad):max(0, y1 + pad), max(0, x0 - pad):max(0, x1 + pad)].any(): return True
+        if m_[max(0, (y0 - pad) * S):max(0, (y1 + pad) * S), max(0, (x0 - pad) * S):max(0, (x1 + pad) * S)].any(): return True
     return False
 LF = 0.8   # soft floor of the auto zoom for trail / orbit lines (0.65 tested: zoom ratchets to 0.3 at docking, worse)
 def main_frame(Rc, Pc, d, v, cx, roles_s, fl, rects, lift=0.0, tails=None, hide_far=True):
@@ -655,36 +678,36 @@ def chase_render(w, h, FIRE, f=None):
     f = 0.5 * w / math.tan(math.radians(33.0)) if f is None else f
     pc_ = pd_ + Rd_ @ (CHASE_OFF * np.array([-1.0, 1.0, 1.0])); Rc_ = look_at(pc_, aim, up=Rd_[:, 2])   # from the docker's -x side
     Kc = np.array([[f, 0, 0.5 * w], [0, f, 0.45 * h], [0, 0, 1.0]])
-    ccol, dep = render_view(Rc_, pc_, own=None, Kc=Kc, head=0.6, znear=0.05, wh=(w, h)); base = cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR)
-    out_ = draw_plumes(base, Rc_, pc_, Rd_, pd_, FIRE, frame, Kp=Kc); m_ = (dep > 0) | (cv2.absdiff(out_, base).max(axis=2) > 40)
+    ccol, dep = render_view(Rc_, pc_, own=None, Kc=Kc, head=0.6, znear=0.05, wh=(w, h), msaa=MSAA); base = cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR)   # msaa: dep = coverage
+    out_ = draw_plumes(base, Rc_, pc_, Rd_, pd_, FIRE, frame, Kp=Kc, sc=S); m_ = (dep > 0) | (cv2.absdiff(out_, base).max(axis=2) > 40)
     return out_, m_
 def misc_inertial(inert):   # the inertial main view, centre square
-    x0 = (WIN_W - WIN_H) // 2
-    return cv2.resize(inert[:, x0:x0 + WIN_H], (TILE, TILE), interpolation=cv2.INTER_AREA)
+    x0 = (PW - PH) // 2
+    return cv2.resize(inert[:, x0:x0 + PH], (TILE * S, TILE * S), interpolation=cv2.INTER_AREA)
 def misc_arm():             # overhead view of the claw, no text
     Rd_, pd_ = W.R_sc["docker"], W.sc["docker"]
     pa = pd_ + Rd_ @ np.array([0.0, 0.55, 1.75]); ta = pd_ + Rd_ @ np.array([0.0, 1.20, 0.10])
-    acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.35, znear=0.05)
+    acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.35, znear=0.05, depth=False)
     g = cv2.cvtColor(auto_expose(cv2.cvtColor(acol, cv2.COLOR_RGB2GRAY), 160), cv2.COLOR_GRAY2BGR)
-    return cv2.resize(g, (TILE, TILE), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(g, (TILE * S, TILE * S), interpolation=cv2.INTER_LINEAR)
 def misc_chase(FIRE):
-    img, _ = chase_render(TILE, TILE, FIRE); return img
-EST_D = 22.0; Kest = R_.K_for(TILE, 34.0)
+    img, _ = chase_render(TILE * S, TILE * S, FIRE); return img
+EST_D = 22.0; Kest = R_.K_for(TILE * S, 34.0)
 def misc_estimate(est_ok, R_est, p_est):
     """TOPEX close-up: the true TOPEX dimmed, the swarm's current pose ESTIMATE drawn over it as a thin outline (its silhouette
     edges), plus the estimated body axes. The outline settles onto the model as the estimate converges."""
     pc_ = np.array([0.35, -1.0, 0.45]); pc_ = pc_ / np.linalg.norm(pc_) * EST_D; Rc_ = look_at(pc_, np.zeros(3))
     hide = CRAFT3
-    col, dep = render_view(Rc_, pc_, own="docker", Kc=Kest, head=0.5, znear=0.3, wh=(TILE, TILE), hide=hide)
+    col, dep = render_view(Rc_, pc_, own="docker", Kc=Kest, head=0.5, znear=0.3, wh=(TILE * S, TILE * S), hide=hide, depth=False)
     img = (cv2.cvtColor(col, cv2.COLOR_RGB2BGR).astype(np.float32) * 0.55).astype(np.uint8)
     if est_ok:
         # camera pose that sees the TRUE TOPEX exactly as this camera would see TOPEX at the ESTIMATED pose
         Tt = T44(W.R_IB, np.zeros(3)); Te = T44(R_est, p_est); Tc = T44(Rc_, pc_)
         Tv = Tt @ np.linalg.inv(Te) @ Tc
-        _, de = render_view(Tv[:3, :3], Tv[:3, 3], own="docker", Kc=Kest, head=0.0, znear=0.3, wh=(TILE, TILE), hide=hide)
+        _, de = render_view(Tv[:3, :3], Tv[:3, 3], own="docker", Kc=Kest, head=0.0, znear=0.3, wh=(TILE * S, TILE * S), hide=hide)
         m = (de > 0).astype(np.uint8)
         cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cv2.drawContours(img, cs, -1, (255, 235, 120), 1, cv2.LINE_AA)
+        cv2.drawContours(img, cs, -1, (255, 235, 120), S, cv2.LINE_AA)
         draw_axes_overlay(img, Rc_.T @ R_est, Rc_.T @ (p_est - pc_), None, 1.0, Kest)
     UT.draw(img, "TOPEX: estimate (outline) vs truth", 6, 5, 11, (200, 200, 200))
     return img
@@ -698,7 +721,7 @@ A_VIS = 20.0                                                    # visual acceler
 END_CLK = math.sqrt(A_VIS / 2e-4)                                # clock rate: v2's Hall-scale 2e-4 m/s^2 covers the same distance in this x the time
 E_COL, E_MSG0, E_MSG1, E_HALL, E_FADE0, E_FADE1, E_PATCH, E_DONE = 1.0, 0.3, 1.3, 1.5, 9.0, 11.0, 11.5, 17.0
 _pp = cv2.imread(_os.path.join(HERE, "assets", "swarm_patch.png"), cv2.IMREAD_UNCHANGED)
-PATCH = cv2.resize(_pp, (560, 560), interpolation=cv2.INTER_AREA) if _pp is not None else None
+PATCH = cv2.resize(_pp, (560 * S, 560 * S), interpolation=cv2.INTER_AREA) if _pp is not None else None
 if PATCH is None: print("[ending] assets/swarm_patch.png missing: the patch card is skipped (placeholder hook)", flush=True)
 def end_begin(col_img):
     global STAGE, te, END_P0, END_TAILS, END_COL, END_T0, END_AZ0, END_EL0, END_D0
@@ -718,11 +741,11 @@ def hall_plumes(img, Rc, Pc, cx, taus):
         x1, y1 = LOOK.project(Rc, Pc, p - DEP_DIR * 50.0, cx)[0][0]
         dx, dy = x1 - x0, y1 - y0; L = math.hypot(dx, dy)
         if z0 <= 0 or not np.isfinite(L) or L < 1e-6: continue
-        Lp = float(np.clip(LOOK.F * 6.0 / max(z0, 1e-6), 30, 220)); dx, dy = dx / L * Lp, dy / L * Lp
+        Lp = float(np.clip(LOOK.F * 6.0 / max(z0, 1e-6), 30 * S, 220 * S)); dx, dy = dx / L * Lp, dy / L * Lp
         for frac, lw, al in ((1.0, 11, 0.12), (0.75, 5.5, 0.25), (0.45, 2.6, 0.6), (0.2, 1.6, 0.9)):   # v2: #8fb4ff glow, plus a white core
-            ov = img.copy(); c_ = (255, 180, 143) if frac > 0.3 else (255, 245, 235)
-            cv2.line(ov, (int(x0), int(y0)), (int(x0 + dx * frac), int(y0 + dy * frac)), c_, max(1, int(round(lw * LOOK.lw))), cv2.LINE_AA)
-            cv2.addWeighted(ov, al * pa, img, 1 - al * pa, 0, img)
+            c_ = (255, 180, 143) if frac > 0.3 else (255, 245, 235); t_ = max(1, int(round(lw * LOOK.lw)))
+            q_ = np.array([[int(x0) * 16, int(y0) * 16], [int(x0 + dx * frac) * 16, int(y0 + dy * frac) * 16]], np.int32)   # == full-frame copy + blend
+            V2._blend_roi(img, q_, t_ + 3, al * pa, lambda ov, q: cv2.line(ov, (int(q[0, 0]) // 16, int(q[0, 1]) // 16), (int(q[1, 0]) // 16, int(q[1, 1]) // 16), c_, t_, cv2.LINE_AA))
 quit_all = False
 END_FRAME = None
 while True:
@@ -811,7 +834,7 @@ while True:
         Rm, Pm, dm = cam_from(Tc, END_AZ0 - 40.0 * uu, END_EL0 + 10.0 * uu, dcam)
         cxe = 640.0; lft = 30.0 + 50.0 * su
         img, cmask = main_frame(Rm, Pm, dm, 78.0, cxe, 1.0, flashes(dt), col_rects(ucol) + [(640 - 470, WIN_H - 60, 640 + 470, WIN_H - 20), (0, 0, 300, 46)], lift=lft, tails=[END_TAILS[k] for k in CRAFT3], hide_far=False)
-        LOOK.F = LOOK_F0 * ZM; LOOK.cy = WIN_H / 2 - lft; hall_plumes(img, Rm, Pm, cxe, taus); LOOK.F = LOOK_F0; LOOK.cy = WIN_H / 2
+        LOOK.F = LOOK_F0 * ZM; LOOK.cy = (WIN_H / 2 - lft) * S; hall_plumes(img, Rm, Pm, cxe * S, taus); LOOK.F = LOOK_F0; LOOK.cy = PH / 2
         canvas = img.copy()
         paste_columns(canvas, END_COL, ucol)
         mb = UT.draw(canvas, END_MSG, 640.0, WIN_H - 52, 22, (255, 255, 255), alpha=float(V2.ss(E_MSG0, E_MSG1, te)), anchor="c")
@@ -819,9 +842,9 @@ while True:
         cover_log("END", cmask, [("message", mb), ("clock", cb), ] + [("column", r_) for r_ in col_rects(ucol)], extra=dict(te=round(te, 2), zoom=round(ZM, 3)))
         canvas = (canvas * (1.0 - float(V2.ss(E_FADE0, E_FADE1, te)))).astype(np.uint8)   # screen goes dark
         if te >= E_PATCH and PATCH is not None:
-            al = float(V2.ss(E_PATCH, E_PATCH + 1.0, te)); y0_, x0_ = (WIN_H - 560) // 2, (WIN_W - 560) // 2
-            pa_ = PATCH[:, :, 3:4].astype(np.float32) / 255.0 * al; roi = canvas[y0_:y0_ + 560, x0_:x0_ + 560].astype(np.float32)
-            canvas[y0_:y0_ + 560, x0_:x0_ + 560] = (roi * (1 - pa_) + PATCH[:, :, :3].astype(np.float32) * pa_).astype(np.uint8)
+            al = float(V2.ss(E_PATCH, E_PATCH + 1.0, te)); y0_, x0_, n5 = (WIN_H - 560) // 2 * S, (WIN_W - 560) // 2 * S, 560 * S
+            pa_ = PATCH[:, :, 3:4].astype(np.float32) / 255.0 * al; roi = canvas[y0_:y0_ + n5, x0_:x0_ + n5].astype(np.float32)
+            canvas[y0_:y0_ + n5, x0_:x0_ + n5] = (roi * (1 - pa_) + PATCH[:, :, :3].astype(np.float32) * pa_).astype(np.uint8)
         r = emit(canvas, WIN_W, allow_pause=False); frame += 1
         if r == "quit": break
         if te >= E_DONE:
@@ -851,7 +874,7 @@ while True:
             else: IR["fresh"] = False
             col = IR["img"]
         else:
-            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3)
+            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False)
         live.append(col); Rcs.append(Rc); pcs.append(pc)
     grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
     fixes = [None] * 3; nin = [0] * 3; t_model = 0.0
@@ -1134,9 +1157,9 @@ while True:
     cr_ = col_rects(a_pan); clock_r = (0, 0, 215, 46); err_r = (640 - 250, WIN_H - 40, 640 + 250, WIN_H - 8)
     fl_ = flashes(dt)
     if MAIN == "chase":
-        ch_, cm_ = chase_render(MAIN_W, WIN_H, FIRE)
-        main_img = np.zeros((WIN_H, WIN_W, 3), np.uint8); main_img[:, MAIN_X0:MAIN_X1] = ch_
-        cmask = np.zeros((WIN_H, WIN_W), bool); cmask[:, MAIN_X0:MAIN_X1] = cm_
+        ch_, cm_ = chase_render(MAIN_W * S, PH, FIRE)
+        main_img = np.zeros((PH, PW, 3), np.uint8); main_img[:, MAIN_X0 * S:MAIN_X1 * S] = ch_
+        cmask = np.zeros((PH, PW), bool); cmask[:, MAIN_X0 * S:MAIN_X1 * S] = cm_
         inert, _ = render_main(Rm, Pm, dm, V_CAM, WIN_W, cx_m, roles_s, fl_, lift=LIFT, want_mask=True, zoom=ZM)
     else:
         main_img, cmask = main_frame(Rm, Pm, dm, V_CAM, cx_m, roles_s, fl_, cr_ + [err_r, clock_r], lift=LIFT); inert = main_img

@@ -21,6 +21,15 @@ def relv(k, ts):
     ts = np.atleast_1d(np.asarray(ts, float)); return np.array([np.interp(ts, REL_T, REL[k][:, j]) for j in range(3)]).T
 def rel(k, t): return relv(k, t)[0]
 
+def _blend_roi(img, q, pad, a, draw, b=None):
+    """== ov = img.copy(); draw(ov, q); cv2.addWeighted(ov, a, img, 1 - a, 0, img), but only over the bounding box of the
+    shape (q: Nx2 int32 points in 1/16 px; pad: px margin covering the stroke / radius + AA). Pixel-identical, ~100x less work."""
+    H, W = img.shape[:2]; b = 1 - a if b is None else b
+    x0 = max(0, int(q[:, 0].min()) // 16 - pad); x1 = min(W, -(-int(q[:, 0].max()) // 16) + pad + 1)
+    y0 = max(0, int(q[:, 1].min()) // 16 - pad); y1 = min(H, -(-int(q[:, 1].max()) // 16) + pad + 1)
+    if x0 >= x1 or y0 >= y1: return
+    sub = img[y0:y1, x0:x1]; ov = sub.copy(); draw(ov, q - np.array([x0 * 16, y0 * 16], np.int32)); cv2.addWeighted(ov, a, sub, b, 0, sub)
+
 def cam(v, el_override=True):
     """v2 camera at story time v -> (R camera->world in OpenCV axes, position, distance d)."""
     v = float(np.clip(v, 21.0, LK[-1, 0])); el = float(LKI[3](v))
@@ -33,9 +42,11 @@ def cam(v, el_override=True):
 
 class Look:
     def __init__(self, W, H):
+        self.S = W / 1280.0   # canvas pixels per 1280-wide unit (2 = HiDPI canvas); thin 1 px strokes scale with it
         self.W, self.H = W, H; self.cy = H / 2; self.keepout_alpha = 1.0; self.F = (W / 2) / math.tan(math.radians(34.0) / 2); self.lw = (100 * W / 1920) / 72.0   # matplotlib pt -> px
         y, x = np.mgrid[0:H, 0:W]; r = np.sqrt(((x - W / 2) / (W / 2)) ** 2 + ((y - H / 2) / (H / 2)) ** 2)
         self.vig = (1 - np.clip((r - 0.75) / 0.7, 0, 1) ** 1.6 * 0.55).astype(np.float32)[..., None]
+        self.vig3 = np.ascontiguousarray(np.repeat(self.vig, 3, axis=2))   # same factors, 3 channels (vectorised multiply, same float32 products)
     def K(self, cx, cy=None): return np.array([[self.F, 0, cx], [0, self.F, self.cy if cy is None else cy], [0, 0, 1.0]])
     def project(self, R, P, X, cx):
         Xc = (np.atleast_2d(X) - P) @ R; z = Xc[:, 2]; zc = np.where(z > 1e-6, z, np.nan)
@@ -43,21 +54,48 @@ class Look:
     def _blend_poly(self, img, pts, col, a, lw):
         pts = np.clip(pts[np.isfinite(pts).all(1)], -2e4, 2e4)
         if a <= 0.005 or len(pts) < 2: return
-        ov = img.copy(); cv2.polylines(ov, [np.round(pts * 16).astype(np.int32)], False, col, max(1, int(round(lw))), cv2.LINE_AA, shift=4)
-        cv2.addWeighted(ov, a, img, 1 - a, 0, img)
+        q = np.round(pts * 16).astype(np.int32); t = max(1, int(round(lw)))
+        _blend_roi(img, q, t + 3, a, lambda ov, q_: cv2.polylines(ov, [q_], False, col, t, cv2.LINE_AA, shift=4))
     def _dot(self, img, xy, col, a, s):
         if a <= 0.01 or not np.isfinite(xy).all(): return
-        rad = max(1.0, 0.5 * math.sqrt(s) * self.lw); ov = img.copy()
-        cv2.circle(ov, (int(round(xy[0] * 16)), int(round(xy[1] * 16))), int(round(rad * 16)), col, -1, cv2.LINE_AA, shift=4); cv2.addWeighted(ov, a, img, 1 - a, 0, img)
+        rad = max(1.0, 0.5 * math.sqrt(s) * self.lw); r16 = int(round(rad * 16))
+        q = np.array([[int(round(xy[0] * 16)), int(round(xy[1] * 16))]], np.int32)
+        _blend_roi(img, q, r16 // 16 + 3, a, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]), int(q_[0, 1])), r16, col, -1, cv2.LINE_AA, shift=4))
     def background(self, R, P, cx, width):
-        img = np.empty((self.H, width, 3), np.uint8); img[:] = BG
+        key = (self.H, width); self._bgc = getattr(self, "_bgc", {})
+        if key not in self._bgc: t_ = np.empty((self.H, width, 3), np.uint8); t_[:] = BG; self._bgc[key] = t_
+        img = self._bgc[key].copy()   # flat BG fill: a cached template copied (a broadcast fill is ~4x slower)
         z = STARS @ R[:, 2]; ok = z > 0.2; S = STARS[ok] @ R
         uv = np.c_[cx + self.F * S[:, 0] / S[:, 2], self.cy + self.F * S[:, 1] / S[:, 2]]; m = SMAG[ok]
         inb = (uv[:, 0] > 0) & (uv[:, 0] < width - 1) & (uv[:, 1] > 0) & (uv[:, 1] < self.H - 1)
-        for (x, y), mg in zip(uv[inb], m[inb]):
-            rad = 0.5 * math.sqrt(0.4 + 5 * mg) * self.lw; a = 0.75 * min(1.0, rad * rad * 3.14 / 1.0) if rad < 0.56 else 0.75
-            xi, yi = int(x), int(y); img[yi, xi] = np.clip(img[yi, xi] * (1 - a) + np.array([230, 216, 207]) * a, 0, 255)
-            if rad > 0.9: cv2.circle(img, (xi, yi), int(round(rad)), (230, 216, 207), -1, cv2.LINE_AA)
+        # stars: a one-pixel (S x S block on a HiDPI canvas) blend, plus a filled AA disc for the bright ones. Same arithmetic and
+        # order as the per-star loop it replaces (identical pixels at S = 1): runs of single-pixel stars between two disc stars are
+        # blended in one vectorised step when no two stars of the run share a pixel; a run with a shared pixel falls back to the loop
+        S_ = max(1, int(round(self.S))); uv, m = uv[inb], m[inb]
+        rad = 0.5 * np.sqrt(0.4 + 5 * m) * self.lw; r1 = rad / self.S
+        al = np.where(r1 < 0.56, 0.75 * np.minimum(1.0, r1 * r1 * 3.14 / 1.0), 0.75)
+        xi = uv[:, 0].astype(np.int64); yi = uv[:, 1].astype(np.int64); disc = r1 > 0.9; STAR = np.array([230, 216, 207], float)
+        H_, W_ = img.shape[:2]
+        def blend(ix):
+            if len(ix) == 0: return
+            if S_ == 1:
+                ys, xs, aa = yi[ix], xi[ix], al[ix][:, None]
+            else:
+                o = np.arange(S_) - (S_ - 1) // 2; oy, ox = np.meshgrid(o, o, indexing="ij")
+                ys = np.clip((yi[ix][:, None] + oy.ravel()).ravel(), 0, H_ - 1); xs = np.clip((xi[ix][:, None] + ox.ravel()).ravel(), 0, W_ - 1)
+                aa = np.repeat(al[ix], S_ * S_)[:, None]
+            img[ys, xs] = np.clip(img[ys, xs] * (1 - aa) + STAR * aa, 0, 255)
+        i0 = 0; n = len(xi)
+        for e in list(np.nonzero(disc)[0]) + [n]:
+            run = np.arange(i0, e)
+            if len(run):
+                key = yi[run] * width + xi[run]
+                if len(np.unique(key)) == len(key) or S_ > 1: blend(run)
+                else:
+                    for j in run: blend(np.array([j]))
+            if e < n:
+                blend(np.array([e])); cv2.circle(img, (int(xi[e]), int(yi[e])), int(round(rad[e])), (230, 216, 207), -1, cv2.LINE_AA)
+            i0 = e + 1
         return img
     def overlays(self, img, R, P, d, cx, v, t_k, roles_s, trail_end_alpha=1.0, burn_flash=(), pos=None, tails=None, hide_far=True):
         """vector layers in v2's order. t_k: per-craft mission clocks (s, relative to TOPEX arrival); roles_s: 0 neutral -> 1 docker/imager colours."""
@@ -70,7 +108,8 @@ class Look:
         for yh in hold:
             xy, zz = self.project(R, P, np.array([0, yh, 0.0]), cx)
             if zz[0] > 0 and np.isfinite(xy).all():
-                ov = img.copy(); cv2.circle(ov, (int(xy[0, 0]), int(xy[0, 1])), max(2, int(0.5 * math.sqrt(22) * self.lw)), bgr(MUTED), 1, cv2.LINE_AA); cv2.addWeighted(ov, 0.8, img, 0.2, 0, img)
+                rr_ = max(2, int(0.5 * math.sqrt(22) * self.lw)); th_ = max(1, int(round(self.S))); q = np.array([[int(xy[0, 0]) * 16, int(xy[0, 1]) * 16]], np.int32)
+                _blend_roi(img, q, rr_ + 3 + th_, 0.8, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]) // 16, int(q_[0, 1]) // 16), rr_, bgr(MUTED), th_, cv2.LINE_AA), b=0.2)
         # keep-out (22 m) and 200 m spheres
         cxy, cz = self.project(R, P, np.zeros(3), cx); self.after_vbar = img.copy()
         for Rr, col, a0, dash in ((200.0, MUTED, 0.45, True), (22.0, C_RED, 0.55, False)):
@@ -105,10 +144,11 @@ class Look:
         for (k, u) in burn_flash:   # expanding burn rings
             xy, z = self.project(R, P, rel(k, t_k[k]), cx)
             if z[0] > 0 and np.isfinite(xy).all():
-                rr = 0.5 * (8 + 34 * u) * self.lw; ov = img.copy(); cv2.circle(ov, (int(xy[0, 0]), int(xy[0, 1])), max(1, int(rr)), bgr(role_col(k, roles_s)), 1, cv2.LINE_AA)
-                cv2.addWeighted(ov, (1 - u) * 0.9, img, 1 - (1 - u) * 0.9, 0, img)
+                rr = max(1, int(0.5 * (8 + 34 * u) * self.lw)); q = np.array([[int(xy[0, 0]) * 16, int(xy[0, 1]) * 16]], np.int32); cb_ = bgr(role_col(k, roles_s)); th_ = max(1, int(round(self.S)))
+                _blend_roi(img, q, rr + 3 + th_, (1 - u) * 0.9, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]) // 16, int(q_[0, 1]) // 16), rr, cb_, th_, cv2.LINE_AA))
         return img
-    def vignette(self, img, x0=0): w = img.shape[1]; return (img * self.vig[:, x0:x0 + w]).astype(np.uint8)
+    def vignette(self, img, x0=0):   # == (img * vig).astype(uint8): the same float32 products, multithreaded in OpenCV
+        w = img.shape[1]; return cv2.multiply(img, self.vig3[:, x0:x0 + w], dtype=cv2.CV_32F).astype(np.uint8)
 
 def role_col(k, s):
     tgt = C_DOCK if k == 0 else C_IMG; return C_NEU * (1 - s) + tgt * s

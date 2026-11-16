@@ -42,6 +42,22 @@ rng = np.random.default_rng(a.seed)
 
 # ------------------------------------------------------------------ assets
 cad = np.load(_os.path.join(HERE, "assets", "cad_render.npz"))
+# display-quality meshes (Daniel 2026-11-16 "SWARM is getting pretty triangly"): tools/build_hq_meshes.py -> assets/cad_hq.npz, the full
+# SolidWorks export at ~126k tris per craft with smoothed normals across soft edges. Display renders only; the simulated cameras keep cad.
+HQ = np.load(_os.path.join(HERE, "assets", "cad_hq.npz")) if _os.path.exists(_os.path.join(HERE, "assets", "cad_hq.npz")) and not _os.environ.get("DEMO_LOWPOLY") else None
+def hq_mesh(key, rgb01, shift=None):
+    """one cad part as a trimesh with face colours; HQ version (+ corner normals in metadata) when available."""
+    src = HQ if HQ is not None else cad
+    v = np.asarray(src[key + "_v"], float) - (0 if shift is None else shift); f = src[key + "_f"]
+    m = trimesh.Trimesh(v, f, process=False)
+    rgb = np.asarray(rgb01, float); rgb = np.tile(rgb, (len(f), 1)) if rgb.ndim == 1 else rgb
+    m.visual.face_colors = np.c_[(np.clip(rgb, 0, 1) * 255).astype(np.uint8), np.full(len(f), 255, np.uint8)]
+    if HQ is not None: m.metadata["cn"] = HQ[key + "_n"]
+    return m
+def cat_meshes(parts):
+    m = trimesh.util.concatenate(parts)
+    if HQ is not None: m.metadata["cn"] = np.concatenate([p.metadata["cn"] for p in parts])
+    return m
 INR = json.load(open(_os.path.join(HERE, "assets", "topex_inertia.json")))
 COM = np.array(INR["com_body_m"]); J = np.array(INR["J_used"])        # ASSUMED: diag(yaw 9371, roll 11665, pitch 4213), COM on mesh y (derive_inertia.py)
 W0_DEFAULT = float(INR["spin_rate_default_rad_s"])                     # 2 pi / 9.5 s about roll (body +y)
@@ -125,6 +141,12 @@ world = gl_render.GLScene(DISP.ctx)
 n_top = world.add(tm)
 n_sc = {k: world.add(m) for k, m in SW.items()}
 n_arm = world.add(DOCK_ARM)
+if HQ is not None:   # display renders (chase / arm / estimate tile) draw these; the simulated cameras keep the cad meshes
+    world.add_hq(n_top, hq_mesh("topex", HQ["topex_c"], shift=COM))
+    _SWC = {"shell": (0.92, 0.92, 0.94), "inner": (0.80, 0.62, 0.30), "arr_dep": (0.10, 0.14, 0.30), "arm_end": (0.85, 0.85, 0.85)}
+    for k_, v_ in ACC.items():
+        world.add_hq(n_sc[k_], cat_meshes([hq_mesh(p_, _SWC.get(p_, v_)) for p_ in (("shell", "inner", "arr_dep") if k_ == "docker" else ("shell", "inner", "arr_dep", "arm_ext", "arm_end"))]))
+    world.add_hq(n_arm, cat_meshes([hq_mesh(p_, _SWC.get(p_, ACC["docker"])) for p_ in ("arm_ext", "arm_end")]))
 class RefRenderer:   # TOPEX-only reference renders in a camera frame, lit by the camera's known sun vector
     def __init__(self):
         self.K = K; self.res = RES; self.scene = gl_render.GLScene(DISP.ctx); self.scene.add(tm)
@@ -179,12 +201,12 @@ def draw_plumes(img, Rc, pc, Rd, pd, FIRE, frame, Kp=None, sc=1):   # sc: canvas
     if not over.any(): return img   # nothing firing: identical result, skips two full-size blurs
     over = cv2.GaussianBlur(over, (0, 0), 3.0 * sc) * 1.3 + cv2.GaussianBlur(over, (0, 0), 0.8 * sc) * 0.5
     return np.clip(img.astype(np.float32) + over, 0, 255).astype(np.uint8)
-def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0):
+def render_view(R_IC, p_IC, own=None, Kc=None, head=0.0, znear=0.3, wh=None, hide=(), depth=True, msaa=0, hq=False):
     for k, n in n_sc.items(): world.set_visible(n, k != own and k not in hide)   # a camera never sees its own bus
     world.set_visible(n_arm, own != "docker")
     Kc = K if Kc is None else Kc; n_ = ARMRES if Kc is Ka else (CHRES if Kc is Kch else (TILE * S if Kc is Kest else RES))
     ww, hh = wh if wh is not None else (n_, n_)
-    return world.render(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head, depth=depth, msaa=msaa)
+    return world.render(Kc, ww, hh, R_IC, p_IC, W.sun, znear=znear, zfar=2000, headlight=head, depth=depth, msaa=msaa, hq=hq)
 def auto_expose(g, target=200.0):   # display auto-exposure: 97th percentile of lit pixels -> target
     m = g > 6
     if m.sum() < 30: return g
@@ -209,15 +231,10 @@ TRACE_H = 50   # per-tile trace strip at the bottom of each cam tile
 ZM = 1.0
 def v2_sc_mesh(accent, keys):
     cols = {"shell": V2_WHITE * 0.92 + accent * 0.08, "inner": V2_FOIL * 0.9, "arr_dep": V2_CELL, "arm_ext": accent * 0.85, "arm_end": V2_WHITE * 0.75}
-    parts = []
-    for key in keys:
-        m = trimesh.Trimesh(cad[key + "_v"], cad[key + "_f"], process=False)
-        m.visual.face_colors = np.c_[np.tile((np.clip(cols[key], 0, 1) * 255).astype(np.uint8), (len(m.faces), 1)), np.full(len(m.faces), 255, np.uint8)]
-        parts.append(m)
-    return trimesh.util.concatenate(parts)
+    return cat_meshes([hq_mesh(key, cols[key]) for key in keys])
 V2_FOIL, V2_CELL, V2_WHITE = np.array([0.74, 0.60, 0.33]), np.array([0.12, 0.19, 0.36]), np.array([0.80, 0.82, 0.85])   # v2 mission_anim.py:472
 mainsc = gl_render.GLScene(DISP.ctx)
-m_top = mainsc.add(tm)
+m_top = mainsc.add(hq_mesh("topex", HQ["topex_c"], shift=COM) if HQ is not None else tm)
 BODY_KEYS = {"docker": ("shell", "inner", "arr_dep"), "imagerA": ("shell", "inner", "arr_dep", "arm_ext", "arm_end"), "imagerB": ("shell", "inner", "arr_dep", "arm_ext", "arm_end")}
 ROLE_ACC = {"docker": V2.C_DOCK, "imagerA": V2.C_IMG, "imagerB": V2.C_IMG}
 m_sc = {k: (mainsc.add(v2_sc_mesh(V2.C_NEU, BODY_KEYS[k])), mainsc.add(v2_sc_mesh(ROLE_ACC[k], BODY_KEYS[k]))) for k in BODY_KEYS}
@@ -244,14 +261,16 @@ def render_main(Rc, Pc, d, v, width, cx, roles_s, flashes, tails=None, hide_far=
     zn = float(np.clip(d * 0.01, 0.05, 5.0))
     if MSAA:   # anti-aliased model edges: blend by pixel coverage (alpha); fully covered pixels are exactly the model colour
         col, al = mainsc.render(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True, msaa=MSAA)
-        m = al > 0; ys_, xs_ = np.nonzero(m); a_ = al[ys_, xs_][:, None]
-        img[ys_, xs_] = (img[ys_, xs_] * (1.0 - a_) + col[ys_, xs_, ::-1] + 0.5).astype(np.uint8)
+        m = al > 0; bx, by, bw, bh = cv2.boundingRect(al)   # only the box the models cover
+        if bw:
+            sl = (slice(by, by + bh), slice(bx, bx + bw)); inv = cv2.cvtColor(255 - al[sl], cv2.COLOR_GRAY2BGR)
+            img[sl] = cv2.add(cv2.multiply(img[sl], inv, scale=1.0 / 255.0), cv2.cvtColor(col[sl], cv2.COLOR_RGB2BGR))
     else:
         col, dep = mainsc.render(LOOK.K(cx, LOOK.cy), width, PH, Rc, Pc, W.sun, znear=zn, zfar=max(4000.0, 4 * d), v2look=True)
         m = dep > 0; img[m] = col[:, :, ::-1][m]
     out = LOOK.vignette(img, 0 if width == PW else (PW - width) // 2)
     if want_mask:
-        mk = m.astype(np.uint8); LOOK.lines_mask = cv2.absdiff(img, LOOK.after_vbar).max(axis=2) > 20   # strict: models (+ discs below); lines: trails / keep-out ring / dots
+        mk = m.astype(np.uint8); LOOK.lines_mask = LazyLines(img, LOOK.after_vbar)   # strict: models (+ discs below); lines: trails / keep-out ring / dots
         xy, z = LOOK.project(Rc, Pc, np.array([np.zeros(3)] + [W.sc[k] for k in CRAFT3]), cx)
         for (x_, y_), z_ in zip(xy, z):
             if z_ > 0 and np.isfinite([x_, y_]).all() and -50 * S < x_ < width + 50 * S and -50 * S < y_ < PH + 50 * S: cv2.circle(mk, (int(x_), int(y_)), 6 * S, 1, -1)
@@ -352,6 +371,17 @@ def acquire(cam="imagerA", group="I"):
 
 # ------------------------------------------------------------------ dashboard
 F = cv2.FONT_HERSHEY_SIMPLEX
+def chmax(d):   # == d.max(axis=2) for uint8 BGR, ~9x faster
+    c = cv2.split(d); return cv2.max(cv2.max(c[0], c[1]), c[2])
+class LazyLines:
+    """lines mask (pixels the content layers changed by > 20 since the reference geometry), computed only for the regions read
+    (the overlay rects) instead of the whole 2x frame. Same values as chmax(absdiff(img, ref)) > 20 at every pixel."""
+    def __init__(self, img, ref): self.a, self.b = img, ref; self.shape = img.shape[:2]
+    def __getitem__(self, key):
+        a_ = self.a[key]
+        if a_.size == 0: return np.zeros(a_.shape[:2], bool)
+        return chmax(cv2.absdiff(a_, self.b[key])) > 20
+    def full(self): return self[:, :]
 def txt(img, s, x, y, sc=0.45, col=(230, 230, 230), th=1): cv2.putText(img, s, (int(x * S), int(y * S)), F, sc * S, col, th * S, cv2.LINE_AA)   # layout units
 HIST = collections.deque(maxlen=600); FULL = []
 def draw_axes_overlay(img, Rcb, tcb, col, scale, Kc=None):
@@ -385,6 +415,8 @@ sliders = {"wx": 0.0, "wy": RATE_LIMITS["wy_default"], "wz": 0.0}
 def corrupt_estimate():   # the hidden X key: rotate the estimate 60 deg off the truth
     filt.q = mekf.qmul(filt.q, mekf.qexp(np.radians(60) * np.array([0.6, 0.0, 0.8]))); STATS["loss_t"].append(round(W.t, 2))
 def apply_cmd(cmd):
+    global SPEC
+    if SPEC is not None: spec_cancel(SPEC); SPEC = None
     if cmd.startswith("w="):
         v = [float(x) for x in cmd[2:].split(",")]; v = np.clip(v, -WMAX3, WMAX3)
         sliders.update(wx=v[0], wy=v[1], wz=v[2])
@@ -411,6 +443,62 @@ writer = None
 if a.record:
     writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), a.fps_out, (PW, PH))
 
+def cam_block():
+    live, Rcs, pcs, use = [], [], [], []
+    Kcs = []
+    for k in CAMS:
+        Rc, pc = W.cam_pose(k)
+        near = k == "docker" and np.linalg.norm(W.sc["docker"] - (filt.p if filt.q is not None else np.zeros(3))) < 11.0
+        Kc = Kn if near else K; Kcs.append(Kc)
+        rng_ = float(np.linalg.norm(W.sc["docker"])) if near else 0.0
+        st = ir_state(k)
+        if st == "dark": col = np.zeros((RES, RES, 3), np.uint8); IR["fresh"] = False
+        elif st == "ir":
+            if W.t - IR["last"] >= 1.0 / IR_HZ - 1e-9 or IR["img"] is None:
+                for kk, n in n_sc.items(): world.set_visible(n, kk != k)
+                world.set_visible(n_arm, True)
+                c_, _ = world.render(K, RES, RES, Rc, pc, Rc @ np.array([0.0, 0.0, -1.0]), znear=0.3, zfar=2000)
+                lo = max(8, int(RES * IR_SCALE)); c_ = cv2.resize(cv2.resize(c_, (lo, lo), interpolation=cv2.INTER_AREA), (RES, RES), interpolation=cv2.INTER_LINEAR)
+                c_ = cv2.GaussianBlur(c_, (0, 0), 1.2).astype(np.float32) * 0.85 + 18 + rng.normal(0, 4.0, c_.shape)
+                IR["img"] = np.clip(c_, 0, 255).astype(np.uint8); IR["last"] = W.t; IR["fresh"] = True
+            else: IR["fresh"] = False
+            col = IR["img"]
+        else:
+            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False)
+        live.append(col); Rcs.append(Rc); pcs.append(pc)
+    grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
+    return live, Rcs, pcs, Kcs, grays
+import concurrent.futures as _cf
+SPEC = None; _POOL = _cf.ThreadPoolExecutor(1) if not _os.environ.get("DEMO_NOPIPE") else None
+def cam_fp():
+    arrs = [W.sun, W.R_IB, np.asarray(filt.p if filt.p is not None else np.zeros(3), float)] + [W.sc[k] for k in sorted(W.sc)] + [W.R_sc[k] for k in sorted(W.R_sc)]
+    return (W.t, filt.q is None, W.attached, IR["cam"], IR["t_fail"], IR["last"], id(IR["img"]), IR.get("fresh"),
+            b"".join(np.ascontiguousarray(x, dtype=np.float64).tobytes() for x in arrs))
+def spec_cancel(sp):
+    if sp.get("fut") is not None: sp["fut"].result()
+    rng.bit_generator.state = sp["rng"]; IR.clear(); IR.update(sp["ir"])
+def track_inputs(Rcs, pcs):
+    idx = [i for i, k in enumerate(CAMS) if not (k == "docker" and (W.attached or not 11.0 <= np.linalg.norm(filt.p - W.sc["docker"]) <= 60.0))
+           and not (ir_state(k) is not None and not IR.get("fresh", False))]
+    pri = [filt.pose_in_camera(Rcs[i], pcs[i]) for i in idx]
+    suns = [np.array([0.0, 0.0, -1.0]) if ir_state(CAMS[i]) == "ir" else (None if a.sun_unknown else Rcs[i].T @ W.sun) for i in idx]
+    return idx, pri, suns
+def same_inputs(x, y):
+    if x[0] != y[0] or len(x[1]) != len(y[1]): return False
+    for (Ra, ta), (Rb, tb) in zip(x[1], y[1]):
+        if not (np.array_equal(Ra, Rb) and np.array_equal(ta, tb)): return False
+    return all((u is None and v is None) or (u is not None and v is not None and np.array_equal(u, v)) for u, v in zip(x[2], y[2]))
+def spec_start():
+    """make next frame's cameras now (state is final for this frame) and start its tracker CPU half on the worker."""
+    global SPEC
+    if _POOL is None or TRK is None: return
+    sp = dict(rng=rng.bit_generator.state, ir=dict(IR), fut=None)
+    sp["cams"] = cam_block(); sp["fp"] = cam_fp()
+    if not W.attached and filt.q is not None and A.ph != "ACQUIRE":
+        live, Rcs, pcs, Kcs, grays = sp["cams"]; ti = track_inputs(Rcs, pcs)
+        if ti[0]:
+            st = TRK.track_begin([grays[i] for i in ti[0]], ti[1], ti[2]); sp["ti"] = ti; sp["fut"] = _POOL.submit(TRK.track_end, st)
+    SPEC = sp
 def keys_of(ev): return [e[1] for e in ev if e[0] == "key"]
 def badge(img, text, x, y, col=(80, 200, 255)):
     (tw, th), _ = cv2.getTextSize(text, F, 0.6, 2); cv2.rectangle(img, (P(x), P(y)), (P(x + tw + 20), P(y + th + 16)), (20, 20, 20), -1)
@@ -422,8 +510,14 @@ def pause_loop(canvas, main_w):
         k = keys_of(DISP.show(c)); time.sleep(1 / 30)
         if "p" in k: return False
         if "q" in k: return True
+_FT = []
+def _fps_report():
+    if len(_FT) > 30:
+        dt_ = np.diff(np.array(_FT[10:])); print(f"[fps] frames={len(_FT)} median={1.0 / np.median(dt_):.2f} mean={len(dt_) / dt_.sum():.2f} p10={1.0 / np.percentile(dt_, 90):.2f}", file=sys.stderr, flush=True)
+import atexit; atexit.register(_fps_report)
 def emit(canvas, main_w, allow_pause=True):
     """write / show one frame; returns 'quit' or the list of keys."""
+    _FT.append(time.perf_counter())   # frame-rate log (median FPS printed at exit)
     if writer is not None: writer.write(canvas)
     if _os.environ.get("DEMO_DUMP") and frame % 5 == 0: cv2.imwrite(_os.path.join(_os.environ["DEMO_DUMP"], f"f{frame:05d}.png"), canvas)
     if a.headless: return []
@@ -678,8 +772,8 @@ def chase_render(w, h, FIRE, f=None):
     f = 0.5 * w / math.tan(math.radians(33.0)) if f is None else f
     pc_ = pd_ + Rd_ @ (CHASE_OFF * np.array([-1.0, 1.0, 1.0])); Rc_ = look_at(pc_, aim, up=Rd_[:, 2])   # from the docker's -x side
     Kc = np.array([[f, 0, 0.5 * w], [0, f, 0.45 * h], [0, 0, 1.0]])
-    ccol, dep = render_view(Rc_, pc_, own=None, Kc=Kc, head=0.6, znear=0.05, wh=(w, h), msaa=MSAA); base = cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR)   # msaa: dep = coverage
-    out_ = draw_plumes(base, Rc_, pc_, Rd_, pd_, FIRE, frame, Kp=Kc, sc=S); m_ = (dep > 0) | (cv2.absdiff(out_, base).max(axis=2) > 40)
+    ccol, dep = render_view(Rc_, pc_, own=None, Kc=Kc, head=0.6, znear=0.05, wh=(w, h), msaa=MSAA, hq=True); base = cv2.cvtColor(ccol, cv2.COLOR_RGB2BGR)   # msaa: dep = coverage
+    out_ = draw_plumes(base, Rc_, pc_, Rd_, pd_, FIRE, frame, Kp=Kc, sc=S); m_ = (dep > 0) | (chmax(cv2.absdiff(out_, base)) > 40)
     return out_, m_
 def misc_inertial(inert):   # the inertial main view, centre square
     x0 = (PW - PH) // 2
@@ -687,7 +781,7 @@ def misc_inertial(inert):   # the inertial main view, centre square
 def misc_arm():             # overhead view of the claw, no text
     Rd_, pd_ = W.R_sc["docker"], W.sc["docker"]
     pa = pd_ + Rd_ @ np.array([0.0, 0.55, 1.75]); ta = pd_ + Rd_ @ np.array([0.0, 1.20, 0.10])
-    acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.35, znear=0.05, depth=False)
+    acol, _ = render_view(look_at(pa, ta, up=Rd_[:, 1]), pa, own=None, Kc=Ka, head=0.35, znear=0.05, depth=False, hq=True)
     g = cv2.cvtColor(auto_expose(cv2.cvtColor(acol, cv2.COLOR_RGB2GRAY), 160), cv2.COLOR_GRAY2BGR)
     return cv2.resize(g, (TILE * S, TILE * S), interpolation=cv2.INTER_LINEAR)
 def misc_chase(FIRE):
@@ -698,7 +792,7 @@ def misc_estimate(est_ok, R_est, p_est):
     edges), plus the estimated body axes. The outline settles onto the model as the estimate converges."""
     pc_ = np.array([0.35, -1.0, 0.45]); pc_ = pc_ / np.linalg.norm(pc_) * EST_D; Rc_ = look_at(pc_, np.zeros(3))
     hide = CRAFT3
-    col, dep = render_view(Rc_, pc_, own="docker", Kc=Kest, head=0.5, znear=0.3, wh=(TILE * S, TILE * S), hide=hide, depth=False)
+    col, dep = render_view(Rc_, pc_, own="docker", Kc=Kest, head=0.5, znear=0.3, wh=(TILE * S, TILE * S), hide=hide, depth=False, hq=True)
     img = (cv2.cvtColor(col, cv2.COLOR_RGB2BGR).astype(np.float32) * 0.55).astype(np.uint8)
     if est_ok:
         # camera pose that sees the TRUE TOPEX exactly as this camera would see TOPEX at the ESTIMATED pose
@@ -854,29 +948,14 @@ while True:
     # ================================================================ OPS
     while ev_i < len(EV) and EV[ev_i][0] <= W.t: apply_cmd(EV[ev_i][1]); ev_i += 1
     # ---- cameras (truth render) + estimation
-    live, Rcs, pcs, use = [], [], [], []
-    Kcs = []
-    for k in CAMS:
-        Rc, pc = W.cam_pose(k)
-        near = k == "docker" and np.linalg.norm(W.sc["docker"] - (filt.p if filt.q is not None else np.zeros(3))) < 11.0
-        Kc = Kn if near else K; Kcs.append(Kc)
-        rng_ = float(np.linalg.norm(W.sc["docker"])) if near else 0.0
-        st = ir_state(k)
-        if st == "dark": col = np.zeros((RES, RES, 3), np.uint8); IR["fresh"] = False
-        elif st == "ir":
-            if W.t - IR["last"] >= 1.0 / IR_HZ - 1e-9 or IR["img"] is None:
-                for kk, n in n_sc.items(): world.set_visible(n, kk != k)
-                world.set_visible(n_arm, True)
-                c_, _ = world.render(K, RES, RES, Rc, pc, Rc @ np.array([0.0, 0.0, -1.0]), znear=0.3, zfar=2000)
-                lo = max(8, int(RES * IR_SCALE)); c_ = cv2.resize(cv2.resize(c_, (lo, lo), interpolation=cv2.INTER_AREA), (RES, RES), interpolation=cv2.INTER_LINEAR)
-                c_ = cv2.GaussianBlur(c_, (0, 0), 1.2).astype(np.float32) * 0.85 + 18 + rng.normal(0, 4.0, c_.shape)
-                IR["img"] = np.clip(c_, 0, 255).astype(np.uint8); IR["last"] = W.t; IR["fresh"] = True
-            else: IR["fresh"] = False
-            col = IR["img"]
-        else:
-            col, _ = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False)
-        live.append(col); Rcs.append(Rc); pcs.append(pc)
-    grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
+    # pipelining: the cameras + tracker inputs for this frame may already have been made at the end of the last frame (same state, same rng
+    # order), with the tracker's CPU half running on a worker thread while the last frame was drawn. Anything that touched the state since
+    # (a command, a key, an event) cancelled it and restored the rng/IR; a fingerprint check catches anything else.
+    SP_ = SPEC; SPEC = None
+    if SP_ is not None and SP_["fp"] == cam_fp(): live, Rcs, pcs, Kcs, grays = SP_["cams"]
+    else:
+        if SP_ is not None: spec_cancel(SP_)
+        SP_ = None; live, Rcs, pcs, Kcs, grays = cam_block()
     fixes = [None] * 3; nin = [0] * 3; t_model = 0.0
     # COAST (Daniel 2026-11-11): wx = wz = 0 -> TOPEX spins steadily about one fixed axis, fully predictable once converged. Through
     # SPIN-MATCH the cameras are paused and the MEKF propagates on its rate estimate (any warp); when spin-match is reached it drops to
@@ -889,6 +968,7 @@ while True:
     if COAST and W.t - A.t_coast0 > 60.0:   # watchdog: a coast this long means the coasted rates are off -> back to 1x on vision, re-settle, replan
         A.t_acq = W.t; A.settle = 10.0; A.delta_goal = None; A.t_coast0 = None; COAST = False
         if _os.environ.get("DEMO_DEBUG"): print(f"[coast watchdog t={W.t:.1f}]", flush=True)
+    if SP_ is not None and SP_.get("fut") is not None and (W.attached or COAST or filt.q is None or A.ph == "ACQUIRE"): SP_["fut"].result()
     FIRE = dict(tau=np.zeros(3), big=False, dv=np.zeros(3), det=None)   # what the docker's thrusters did this frame (for the plumes)
     if W.attached:
         pass   # gripped: TOPEX state comes from the docker's IMU through the rigid grip
@@ -903,11 +983,13 @@ while True:
             if getattr(A, "resume", None) == "SPIN-MATCH": A.relock = False; A.delta_goal = None   # replan the clocking and coast again
             A.set(A.resume if hasattr(A, "resume") and A.resume else "CONVERGE", W.t); A.resume = None
     else:
-        idx = [i for i, k in enumerate(CAMS) if not (k == "docker" and (W.attached or not 11.0 <= np.linalg.norm(filt.p - W.sc["docker"]) <= 60.0))
-               and not (ir_state(k) is not None and not IR.get("fresh", False))]
-        pri = [filt.pose_in_camera(Rcs[i], pcs[i]) for i in idx]
-        suns = [np.array([0.0, 0.0, -1.0]) if ir_state(CAMS[i]) == "ir" else (None if a.sun_unknown else Rcs[i].T @ W.sun) for i in idx]
-        t0 = time.perf_counter(); out, nn = TRK.track([grays[i] for i in idx], pri, suns); t_model = time.perf_counter() - t0
+        idx, pri, suns = track_inputs(Rcs, pcs)
+        t0 = time.perf_counter()
+        if SP_ is not None and SP_.get("fut") is not None and same_inputs(SP_["ti"], (idx, pri, suns)): out, nn = SP_["fut"].result()
+        else:
+            if SP_ is not None and SP_.get("fut") is not None: SP_["fut"].result()
+            out, nn = TRK.track([grays[i] for i in idx], pri, suns)
+        t_model = time.perf_counter() - t0
         accepted = 0
         for j, i in enumerate(idx):
             if out[j] is None: continue
@@ -920,6 +1002,7 @@ while True:
             A.resume = A.ph if A.ph not in ("ACQUIRE", "CONVERGE") else None; A.set("ACQUIRE", W.t); filt.q = None; lost_count = 0
             if getattr(A, "pf_hist", None):   # drop the COM average's last ~20 frames: they came from the estimate that just failed
                 A.pf, A.npf = A.pf_hist[0]; A.pf_hist.clear()
+    if SP_ is not None and SP_.get("fut") is not None: SP_["fut"].result()   # unused (branch changed): let the worker finish
     # ---- time step
     warp = a.detumble_warp if A.ph == "DETUMBLE" else (10.0 if A.ph in ("BACK OFF", "DEPART") else (a.spinmatch_warp if COAST else 1.0)); dts = dt * warp
     if A.ph == "DETUMBLE":
@@ -1140,6 +1223,7 @@ while True:
         wf = 1.0 if A.ph == "BACK OFF" else 1.0 - float(V2.smoother((t_demo - A.t_dep_demo) / ZOOM_T))
         Tm = Pm + Rm[:, 2] * dm; mid = 0.5 * W.sc["docker"]; dneed = 2.2 * float(np.linalg.norm(W.sc["docker"])) + 14.0
         Tm = Tm + (mid - Tm) * wf; dm = max(dm, dneed * wf); Pm = Tm - Rm[:, 2] * dm
+    spec_start()
     a_pan = float(np.clip(t_go / 1.5, 0, 1)); a_pan = a_pan * a_pan * (3 - 2 * a_pan); roles_s = float(np.clip(t_go / 1.0, 0, 1))
     # ---- camera choreography (Daniel 2026-11-12 1:36 PM): main pane in the middle, never overlapped; misc square bottom-left:
     #      before the docker arrives: TOPEX close-up (estimate outline over truth); SPIN-MATCH: chase main + inertial misc; FINAL APPROACH

@@ -54,6 +54,22 @@ class Tracker:
         rv, tv = cv2.solvePnPRefineLM(Xb[inl], pl[ok][inl].astype(np.float64), self.K, None, rv, tv)
         return cv2.Rodrigues(rv)[0], tv[:, 0], len(inl)
 
+    def track_begin(self, live_gray_list, priors, suns=None):
+        """GL half of track() (iters == 1): reference renders + crops. Must run on the GL thread."""
+        assert self.iters == 1
+        jobs, ims = self.prepare(live_gray_list, list(priors), suns); return jobs, ims, len(priors)
+
+    def track_end(self, st):
+        """CPU half of track() (feature model + PnP); safe on a worker thread. Same output as track()."""
+        jobs, ims, n = st; out = [None] * n; n_in = [0] * n
+        feats = self.f.extract(ims) if ims else []
+        k = 0
+        for ci, job in enumerate(jobs):
+            if job is None: continue
+            res = self.solve(job, feats[k], feats[k + 1]); k += 2
+            if res is not None: out[ci] = (res[0], res[1]); n_in[ci] = res[2]
+        return out, n_in
+
     def track(self, live_gray_list, priors, suns=None):
         out = list(priors); cur = list(priors); n_in = [0] * len(priors)
         for _ in range(self.iters):

@@ -3,7 +3,7 @@ One GL context for everything: a standalone context (EGL on Linux, CGL on macOS)
 pyglet window in window mode. Flat-shaded per-face colours, one directional sun + ambient, two-sided lighting.
 render() returns RGB uint8 (H,W,3) and metric depth float32 (H,W) (0 = background), like pyrender.
 Camera convention: OpenCV (x right, y down, z forward); camera pose given as camera->world rotation and position."""
-import sys, numpy as np, moderngl
+import sys, numpy as np, moderngl, cv2
 
 VS = """#version 330
 uniform mat4 M; uniform mat3 Mn; uniform mat4 V; uniform mat4 P;
@@ -37,12 +37,16 @@ class GLScene:
         self.objs = []; self.amb = ambient; self.kd = kd; self.fbos = {}; self.sun = np.array([0, 0, 1.0])
     def add(self, mesh, pose=np.eye(4)):
         v = np.asarray(mesh.vertices, np.float32)[np.asarray(mesh.faces)].reshape(-1, 3)
-        n = np.repeat(np.asarray(mesh.face_normals, np.float32), 3, axis=0)
+        cn = mesh.metadata.get("cn") if hasattr(mesh, "metadata") else None   # optional (F,3,3) smoothed corner normals (display meshes)
+        n = np.asarray(cn, np.float32).reshape(-1, 3) if cn is not None else np.repeat(np.asarray(mesh.face_normals, np.float32), 3, axis=0)
         fc = np.asarray(mesh.visual.face_colors)[:, :3].astype(np.float32) / 255.0
         c = np.repeat(fc ** 2.2, 3, axis=0)                 # sRGB -> linear albedo
         vbo = self.ctx.buffer(np.c_[v, n, c].astype(np.float32).tobytes())
         vao = self.ctx.vertex_array(self.prog, [(vbo, "3f 3f 3f", "in_p", "in_n", "in_c")])
         self.objs.append(dict(vao=vao, pose=np.array(pose, float), visible=True)); return len(self.objs) - 1
+    def add_hq(self, i, mesh):
+        """alternate (display-quality) geometry for object i, drawn instead of it by render(..., hq=True); shares its pose/visibility."""
+        j = self.add(mesh); self.objs[i]["vao_hq"] = self.objs.pop(j)["vao"]
     def set_pose(self, i, T): self.objs[i]["pose"] = np.array(T, float)
     def set_visible(self, i, vis): self.objs[i]["visible"] = bool(vis)
     def _fbo_ms(self, w, h, samples):
@@ -60,18 +64,19 @@ class GLScene:
             col = self.ctx.renderbuffer((w, h), 4); d = self.ctx.depth_texture((w, h))
             self.fbos[(w, h)] = self.ctx.framebuffer(color_attachments=[col], depth_attachment=d)
         return self.fbos[(w, h)]
-    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0):
+    def render(self, K, W, H, R_IC, p_IC, sun_w, znear=0.3, zfar=2000.0, headlight=0.0, amb_override=None, v2look=False, depth=True, msaa=0, hq=False):
         """depth=True: (RGB, metric depth). depth=False: (RGB, None). msaa=N (display views only): N-sample anti-aliased edges,
-        returns (RGB premultiplied over black, coverage alpha float32 0..1) -- composite as img*(1-a) + rgb."""
+        returns (RGB premultiplied over black, coverage alpha uint8 0..255) -- composite as img*(1-a/255) + rgb."""
         n, f = znear, zfar
         P = np.array([[2 * K[0, 0] / W, 0, 2 * K[0, 2] / W - 1, 0],
                       [0, -2 * K[1, 1] / H, 1 - 2 * K[1, 2] / H, 0],
                       [0, 0, (f + n) / (f - n), -2 * f * n / (f - n)], [0, 0, 1, 0]], np.float64)
+        if msaa: P[1] = [0, 2 * K[1, 1] / H, 2 * K[1, 2] / H - 1, 0]   # display views: image row 0 -> GL row 0, readback already top-down (no flip copy)
         V = np.eye(4); V[:3, :3] = R_IC.T; V[:3, 3] = -R_IC.T @ p_IC
         if msaa: fms, frs = self._fbo_ms(W, H, msaa); fbo = fms
         else: fbo = self._fbo(W, H)
         fbo.use(); fbo.clear(0, 0, 0, 0)
-        self.ctx.enable(moderngl.DEPTH_TEST); self.ctx.disable(moderngl.CULL_FACE)
+        self.ctx.enable(moderngl.DEPTH_TEST); self.ctx.disable(moderngl.CULL_FACE); self.ctx.front_face = "cw" if msaa else "ccw"   # y flipped -> winding flipped
         s = np.asarray(sun_w, float); s = s / np.linalg.norm(s)
         pr = self.prog; pr["V"].write(V.T.astype("f4").tobytes()); pr["P"].write(P.T.astype("f4").tobytes())
         pr["sun"].value = tuple(s); pr["amb"].value = self.amb if amb_override is None else float(amb_override); pr["kd"].value = self.kd
@@ -81,13 +86,14 @@ class GLScene:
             if not o["visible"]: continue
             M = o["pose"]; pr["M"].write(M.T.astype("f4").tobytes())
             Mn = np.linalg.inv(M[:3, :3]).T; pr["Mn"].write(Mn.T.astype("f4").tobytes())
-            o["vao"].render(moderngl.TRIANGLES)
-        if msaa:
+            (o.get("vao_hq", o["vao"]) if hq else o["vao"]).render(moderngl.TRIANGLES)
+        self.ctx.front_face = "ccw"
+        if msaa:   # returns (RGB premultiplied, coverage alpha uint8 0..255)
             self.ctx.copy_framebuffer(frs, fms)
-            rgba = np.frombuffer(frs.read(components=4, attachment=0), np.uint8).reshape(H, W, 4)[::-1]
-            return np.ascontiguousarray(rgba[:, :, :3]), rgba[:, :, 3].astype(np.float32) * (1.0 / 255.0)
-        col = np.frombuffer(fbo.read(components=3, attachment=0), np.uint8).reshape(H, W, 3)[::-1]
-        if not depth: return np.ascontiguousarray(col), None
-        d = np.frombuffer(fbo.read(components=1, attachment=-1, dtype="f4"), np.float32).reshape(H, W)[::-1].astype(np.float64)
+            rgba = np.empty((H, W, 4), np.uint8); frs.read_into(rgba, components=4, attachment=0)
+            return cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), np.ascontiguousarray(rgba[:, :, 3])
+        col = np.empty((H, W, 3), np.uint8); fbo.read_into(col, components=3, attachment=0); col = cv2.flip(col, 0)
+        if not depth: return col, None
+        d = np.empty((H, W), np.float32); fbo.read_into(d, components=1, attachment=-1, dtype="f4"); d = cv2.flip(d, 0).astype(np.float64)
         zn = 2.0 * d - 1.0; z = (2.0 * f * n) / ((f + n) - zn * (f - n)); z[d >= 1.0 - 1e-7] = 0.0
-        return np.ascontiguousarray(col), np.ascontiguousarray(z.astype(np.float32))
+        return col, z.astype(np.float32)

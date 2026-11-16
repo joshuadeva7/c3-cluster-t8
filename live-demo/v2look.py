@@ -47,6 +47,7 @@ class Look:
         y, x = np.mgrid[0:H, 0:W]; r = np.sqrt(((x - W / 2) / (W / 2)) ** 2 + ((y - H / 2) / (H / 2)) ** 2)
         self.vig = (1 - np.clip((r - 0.75) / 0.7, 0, 1) ** 1.6 * 0.55).astype(np.float32)[..., None]
         self.vig3 = np.ascontiguousarray(np.repeat(self.vig, 3, axis=2))   # same factors, 3 channels (vectorised multiply, same float32 products)
+        self.vig8 = np.clip(np.round(self.vig3 * 255.0), 0, 255).astype(np.uint8)
     def K(self, cx, cy=None): return np.array([[self.F, 0, cx], [0, self.F, self.cy if cy is None else cy], [0, 0, 1.0]])
     def project(self, R, P, X, cx):
         Xc = (np.atleast_2d(X) - P) @ R; z = Xc[:, 2]; zc = np.where(z > 1e-6, z, np.nan)
@@ -147,8 +148,8 @@ class Look:
                 rr = max(1, int(0.5 * (8 + 34 * u) * self.lw)); q = np.array([[int(xy[0, 0]) * 16, int(xy[0, 1]) * 16]], np.int32); cb_ = bgr(role_col(k, roles_s)); th_ = max(1, int(round(self.S)))
                 _blend_roi(img, q, rr + 3 + th_, (1 - u) * 0.9, lambda ov, q_: cv2.circle(ov, (int(q_[0, 0]) // 16, int(q_[0, 1]) // 16), rr, cb_, th_, cv2.LINE_AA))
         return img
-    def vignette(self, img, x0=0):   # == (img * vig).astype(uint8): the same float32 products, multithreaded in OpenCV
-        w = img.shape[1]; return cv2.multiply(img, self.vig3[:, x0:x0 + w], dtype=cv2.CV_32F).astype(np.uint8)
+    def vignette(self, img, x0=0):   # img * vig in 8-bit fixed point (within 1/255 of the float product; ~3x faster, no float frame)
+        w = img.shape[1]; return cv2.multiply(img, self.vig8[:, x0:x0 + w], scale=1.0 / 255.0)
 
 def role_col(k, s):
     tgt = C_DOCK if k == 0 else C_IMG; return C_NEU * (1 - s) + tgt * s

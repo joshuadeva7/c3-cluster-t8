@@ -21,12 +21,15 @@ def relv(k, ts):
     ts = np.atleast_1d(np.asarray(ts, float)); return np.array([np.interp(ts, REL_T, REL[k][:, j]) for j in range(3)]).T
 def rel(k, t): return relv(k, t)[0]
 
+def _box(q, pad, W, H):   # px box [x0,x1) x [y0,y1) of 1/16-px points q plus pad (cv2.boundingRect = the exact int min / max, one call)
+    bx, by, bw, bh = cv2.boundingRect(q)
+    return max(0, bx // 16 - pad), max(0, by // 16 - pad), min(W, -(-(bx + bw - 1) // 16) + pad + 1), min(H, -(-(by + bh - 1) // 16) + pad + 1)
+
 def _blend_roi(img, q, pad, a, draw, b=None):
     """== ov = img.copy(); draw(ov, q); cv2.addWeighted(ov, a, img, 1 - a, 0, img), but only over the bounding box of the
     shape (q: Nx2 int32 points in 1/16 px; pad: px margin covering the stroke / radius + AA). Pixel-identical, ~100x less work."""
     H, W = img.shape[:2]; b = 1 - a if b is None else b
-    x0 = max(0, int(q[:, 0].min()) // 16 - pad); x1 = min(W, -(-int(q[:, 0].max()) // 16) + pad + 1)
-    y0 = max(0, int(q[:, 1].min()) // 16 - pad); y1 = min(H, -(-int(q[:, 1].max()) // 16) + pad + 1)
+    x0, y0, x1, y1 = _box(q, pad, W, H)
     if x0 >= x1 or y0 >= y1: return
     sub = img[y0:y1, x0:x1]; ov = sub.copy(); draw(ov, q - np.array([x0 * 16, y0 * 16], np.int32)); cv2.addWeighted(ov, a, sub, b, 0, sub)
 
@@ -36,9 +39,7 @@ def _blend_tiled(img, q, pad, a, col, t, T=64):
     The line is drawn once, in full, into the same box with the same offsets as _blend_roi (so the same pixels), onto a scratch frame in which only
     the TxT tiles within pad px of some segment hold a copy of img; it can touch nothing else, so only those tiles are
     blended back. Per-pixel the same addWeighted as one blend over the whole box: pixel-identical. False = box small, not used."""
-    H, W = img.shape[:2]
-    x0 = max(0, int(q[:, 0].min()) // 16 - pad); x1 = min(W, -(-int(q[:, 0].max()) // 16) + pad + 1)
-    y0 = max(0, int(q[:, 1].min()) // 16 - pad); y1 = min(H, -(-int(q[:, 1].max()) // 16) + pad + 1)
+    H, W = img.shape[:2]; x0, y0, x1, y1 = _box(q, pad, W, H)
     if (x1 - x0) * (y1 - y0) < 60000 or len(q) < 2: return False
     lo = np.minimum(q[:-1], q[1:]) // 16 - pad; hi = -(-np.maximum(q[:-1], q[1:]) // 16) + pad + 1   # per-segment px box (half-open)
     lo = np.maximum(lo, 0); hi = np.minimum(hi, [W, H]); ok = (hi[:, 0] > lo[:, 0]) & (hi[:, 1] > lo[:, 1])

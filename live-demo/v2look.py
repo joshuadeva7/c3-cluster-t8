@@ -5,7 +5,7 @@ z cross-track), metres, TOPEX at the origin. Canvas images are BGR uint8."""
 import math, os, numpy as np, cv2
 from scipy.interpolate import PchipInterpolator
 HERE = os.path.dirname(os.path.abspath(__file__))
-H5 = np.load(os.path.join(HERE, "assets", "v2_handoff.npz"))
+H5 = dict(np.load(os.path.join(HERE, "assets", "v2_handoff.npz")))   # loaded once: NpzFile re-reads + unzips on every [] access
 LK = H5["LK"]; CUT_EL = float(H5["CUT_EL"]); V0 = float(H5["v"]); TREL0 = float(H5["trel"])
 LKI = [PchipInterpolator(LK[:, 0], LK[:, j]) for j in (1, 2, 3, 4)]; LKD = PchipInterpolator(LK[:, 0], np.log(LK[:, 5]))
 LKX = PchipInterpolator([0, 21.0, 24.0, 27.5, 31.0, 200], [-1600, -1600, -1100, -250, 0, 0])

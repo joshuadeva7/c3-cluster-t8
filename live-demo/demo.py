@@ -529,10 +529,35 @@ def cam_block():
             col = render_view(Rc, pc, own=k, Kc=Kc, head=(1.4 * float(np.clip(rng_ / 9.0, 0.12, 1.0))) if near else 0.0, znear=0.05 if near else 0.3, depth=False, slot=1 + len(live))   # fetched below
         live.append(col); Rcs.append(Rc); pcs.append(pc)
     live = [c()[0] if callable(c) else c for c in live]   # all three cameras were submitted back to back; read them back now
-    grays = [R_.degrade(c, rng) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
+    grays = [R_.degrade(c, NOISE) if ir_state(CAMS[i]) is None else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY) for i, c in enumerate(live)]
+    NOISE.ahead(3, (RES, RES))   # next frame's camera read noise, drawn on a spare core from where the rng stands now
     return live, Rcs, pcs, Kcs, grays
+class NoiseAhead:
+    """rng.normal for the camera noise, drawn one frame early on a worker thread from a copy of the rng at its current state.
+    A pre-drawn array is used only if the real rng is at exactly the state it was drawn from (same call, same shape): the
+    values are then the very numbers rng.normal would return, and the rng is moved to the state after them. Anything else
+    (an IR frame's noise, a restored state, another shape) falls back to drawing from rng directly. Bit-identical either way."""
+    def __init__(self, rng):
+        self.rng = rng; self.fut = None; self.pool = _cf.ThreadPoolExecutor(1) if not _os.environ.get("DEMO_NOPIPE") else None
+    def ahead(self, n, shape):
+        if self.pool is None: return
+        if self.fut is not None: self.fut.result()
+        st = self.rng.bit_generator.state
+        def work():
+            g = np.random.Generator(type(self.rng.bit_generator)()); g.bit_generator.state = st; out = []
+            for _ in range(n): s0 = g.bit_generator.state; x = g.normal(0, 3.0, shape); out.append((s0, x, g.bit_generator.state))
+            return out
+        self.fut = self.pool.submit(work)
+    def normal(self, loc, scale, size):
+        if self.fut is not None and loc == 0 and scale == 3.0:
+            q = self.fut.result()
+            if q and q[0][1].shape == tuple(size) and q[0][0] == self.rng.bit_generator.state:
+                _, x, s1 = q.pop(0); self.rng.bit_generator.state = s1; return x
+            self.fut = None
+        return self.rng.normal(loc, scale, size)
 import concurrent.futures as _cf
 SPEC = None; _POOL = _cf.ThreadPoolExecutor(1) if not _os.environ.get("DEMO_NOPIPE") else None
+NOISE = NoiseAhead(rng)
 def cam_fp():
     arrs = [W.sun, W.R_IB, np.asarray(filt.p if filt.p is not None else np.zeros(3), float)] + [W.sc[k] for k in sorted(W.sc)] + [W.R_sc[k] for k in sorted(W.R_sc)]
     return (W.t, filt.q is None, W.attached, IR["cam"], IR["t_fail"], IR["last"], id(IR["img"]), IR.get("fresh"),
